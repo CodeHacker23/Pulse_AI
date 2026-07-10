@@ -1,0 +1,2 @@
+ALTER TABLE channel_posts
+    ADD COLUMN is_forwarded BOOLEAN NOT NULL DEFAULT FALSE;

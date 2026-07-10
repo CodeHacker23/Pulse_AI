@@ -1,0 +1,36 @@
+# Скопируйте в application-local.yaml в корне проекта.
+
+# --- Вариант 1: без Docker (H2, по умолчанию для локальной разработки) ---
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/channelpulse;MODE=PostgreSQL;AUTO_SERVER=TRUE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+  flyway:
+    enabled: false
+
+# --- Вариант 2: с Docker (раскомментируйте, когда docker compose up -d работает) ---
+# spring:
+#   datasource:
+#     url: jdbc:postgresql://localhost:5432/channelpulse
+#     username: channelpulse
+#     password: channelpulse
+#   jpa:
+#     hibernate:
+#       ddl-auto: validate
+#   flyway:
+#     enabled: true
+
+telegram:
+  bot:
+    token: "123456:ABC-DEF..."
+    username: YourBotUsername
+    enabled: true
+
+pulse:
+  ai:
+    api-key: sk-your-proxyapi-key
