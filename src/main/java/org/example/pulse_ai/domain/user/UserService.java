@@ -2,8 +2,10 @@ package org.example.pulse_ai.domain.user;
 
 import lombok.RequiredArgsConstructor;
 import org.example.pulse_ai.domain.channel.ConnectionStatus;
+import org.example.pulse_ai.persistence.entity.BalanceTransactionEntity;
 import org.example.pulse_ai.persistence.entity.ChannelEntity;
 import org.example.pulse_ai.persistence.entity.UserEntity;
+import org.example.pulse_ai.persistence.repository.BalanceTransactionRepository;
 import org.example.pulse_ai.persistence.repository.ChannelRepository;
 import org.example.pulse_ai.persistence.repository.UserRepository;
 import org.springframework.stereotype.Service;
@@ -19,6 +21,7 @@ public class UserService {
 
     private final UserRepository userRepository;
     private final ChannelRepository channelRepository;
+    private final BalanceTransactionRepository balanceTransactionRepository;
 
     @Transactional
     public UserEntity findOrCreate(User telegramUser) {
@@ -49,6 +52,7 @@ public class UserService {
         user.setBalance(user.getBalance() - 1);
         user.setTotalRequests(user.getTotalRequests() + 1);
         userRepository.save(user);
+        recordBalanceChange(user.getId(), -1, user.getBalance(), "request_charge", requestId);
     }
 
     @Transactional
@@ -56,7 +60,27 @@ public class UserService {
         userRepository.findById(userId).ifPresent(user -> {
             user.setBalance(user.getBalance() + 1);
             userRepository.save(user);
+            recordBalanceChange(userId, 1, user.getBalance(), "request_refund", requestId);
         });
+    }
+
+    @Transactional
+    public void creditBalance(Long userId, int amount, String reason, Long referenceId) {
+        userRepository.findById(userId).ifPresent(user -> {
+            user.setBalance(user.getBalance() + amount);
+            userRepository.save(user);
+            recordBalanceChange(userId, amount, user.getBalance(), reason, referenceId);
+        });
+    }
+
+    private void recordBalanceChange(Long userId, int delta, int balanceAfter, String reason, Long referenceId) {
+        BalanceTransactionEntity tx = new BalanceTransactionEntity();
+        tx.setUserId(userId);
+        tx.setDelta(delta);
+        tx.setBalanceAfter(balanceAfter);
+        tx.setReason(reason);
+        tx.setReferenceId(referenceId);
+        balanceTransactionRepository.save(tx);
     }
 
     @Transactional

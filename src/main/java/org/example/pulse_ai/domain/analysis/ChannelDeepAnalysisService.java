@@ -50,6 +50,48 @@ public class ChannelDeepAnalysisService {
         return analyzeChannel(channelId, channelTitle, metrics, periodFrom, periodTo, null);
     }
 
+    public boolean needsSparseAnalysis(AnalysisMetrics metrics, int subscribers) {
+        if (metrics.postCount() < analysisProperties.getMinPostsFull() || metrics.limitedAnalysis()) {
+            return true;
+        }
+        if (subscribers > 0 && subscribers <= 100
+                && metrics.avgViews() > Math.max(subscribers * 3, 30)) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Честный разбор для нового/пустого канала — без LLM и без чужих метрик с TGStat.
+     */
+    public String sparseChannelAnalysis(String channelTitle, AnalysisMetrics metrics, int subscribers) {
+        String subsLine = subscribers > 0
+                ? "**" + subscribers + "** подписчиков"
+                : "подписчиков пока мало";
+        String postsLine = metrics.postCount() == 1
+                ? "**1** пост"
+                : "**" + metrics.postCount() + "** постов";
+
+        return """
+                📌 **Главное**
+                Канал «%s» только на старте: %s, %s. Сейчас рано судить об охватах и вовлечённости — сначала нужна регулярная лента из 5–10 постов.
+
+                🎯 **О чём канал и кто аудитория**
+                Пока мало сигналов из контента. Определите одну тему и для кого вы пишете — это станет основой первых постов.
+
+                🧲 **Почему цепляет (или нет)**
+                Недостаточно публикаций, чтобы увидеть паттерны. Первые посты — тест: заголовок с выгодой, короткий текст, один чёткий вывод.
+
+                📉 **Где теряются просмотры**
+                На пустом канале главная «просадка» — отсутствие контента. Подписчики не возвращаются, если в ленте тишина.
+
+                💡 **3 шага роста**
+                1. **Опубликуйте 3 поста за неделю** (знакомство, польза, личная история)
+                2. **Закрепите пост с оффером канала** (зачем подписываться)
+                3. **Спросите аудиторию вопрос в конце** (первые реакции и обратная связь)
+                """.formatted(channelTitle, postsLine, subsLine).trim();
+    }
+
     public String analyzeChannel(
             Long channelId,
             String channelTitle,

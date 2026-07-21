@@ -1,9 +1,10 @@
 # ChannelPulse AI — Roadmap MVP (6 недель)
 
 > Июль–Август 2026 · 1 разработчик full-time
-> Документы: [PRODUCT_STATUS.md](./PRODUCT_STATUS.md) · [USER_FLOW.md](./USER_FLOW.md) · [TECHNICAL_SPEC.md](./TECHNICAL_SPEC.md) · [PROMPTS.md](./PROMPTS.md) · **[SCOUT_MODULE.md](./SCOUT_MODULE.md)** (авто-скаут, internal)
+> Документы: [PRODUCT_STATUS.md](./PRODUCT_STATUS.md) · [USER_FLOW.md](./USER_FLOW.md) · [TECHNICAL_SPEC.md](./TECHNICAL_SPEC.md) · [PROMPTS.md](./PROMPTS.md) · **[SCOUT_MODULE.md](./SCOUT_MODULE.md)** (авто-скаут, internal) · **[VISION_AND_MODULES.md](./VISION_AND_MODULES.md)** (курс после MVP: агент / Obsidian / админка)
 >
 > Актуальный статус продукта, changelog и план новых модулей (база ниш, скауты, рекламный маркетплейс) — в **[PRODUCT_STATUS.md](./PRODUCT_STATUS.md)**.
+> Долгосрочный курс (сначала ядро продукта, потом модули) — в **[VISION_AND_MODULES.md](./VISION_AND_MODULES.md)**.
 
 ---
 

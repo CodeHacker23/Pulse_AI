@@ -6,18 +6,24 @@ import org.example.pulse_ai.config.PulseAnalysisProperties;
 import org.example.pulse_ai.config.PulseBillingProperties;
 import org.example.pulse_ai.domain.analysis.AnalysisSnapshotService;
 import org.example.pulse_ai.domain.analysis.DeepAnalysisSections;
+import org.example.pulse_ai.domain.analysis.GeneratedPostService;
 import org.example.pulse_ai.domain.analysis.IdeasGenerationService;
+import org.example.pulse_ai.domain.analysis.PollDraftService;
+import org.example.pulse_ai.domain.analysis.PostsGenerationService;
 import org.example.pulse_ai.domain.analysis.PostDraftService;
 import org.example.pulse_ai.domain.request.RequestType;
 import org.example.pulse_ai.keyboard.KeyboardFactory;
 import org.example.pulse_ai.persistence.entity.AnalysisRequestEntity;
 import org.example.pulse_ai.persistence.entity.ChannelEntity;
 import org.example.pulse_ai.persistence.entity.ContentIdeaEntity;
+import org.example.pulse_ai.persistence.entity.GeneratedPostEntity;
 import org.example.pulse_ai.persistence.repository.AnalysisRequestRepository;
 import org.example.pulse_ai.persistence.repository.ChannelRepository;
+import org.example.pulse_ai.persistence.repository.PackageRepository;
 import org.example.pulse_ai.session.UserSession;
 import org.example.pulse_ai.session.UserSessionService;
 import org.example.pulse_ai.stats.AnalyticsService;
+import org.example.pulse_ai.stats.ChannelSyncService;
 import org.example.pulse_ai.stats.external.ExternalChannelMetrics;
 import org.example.pulse_ai.stats.external.ExternalMetricsService;
 import org.example.pulse_ai.stats.model.AnalysisMetrics;
@@ -38,20 +44,29 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ResultCallbackHandler {
 
+    private static final int IDEAS_PER_PAGE = 3;
+    private static final int IDEAS_POOL_MAX = 9;
+
     private final AnalysisSnapshotService snapshotService;
     private final AnalysisRequestRepository requestRepository;
     private final ChannelRepository channelRepository;
     private final AnalyticsService analyticsService;
+    private final ChannelSyncService channelSyncService;
     private final ExternalMetricsService externalMetricsService;
     private final StatsMessageBuilder statsMessageBuilder;
     private final AnalysisChartRenderer chartRenderer;
     private final IdeasGenerationService ideasGenerationService;
     private final PostDraftService postDraftService;
+    private final PollDraftService pollDraftService;
+    private final PollHandler pollHandler;
+    private final GeneratedPostService generatedPostService;
+    private final PostsGenerationService postsGenerationService;
     private final PulseAnalysisProperties analysisProperties;
     private final TelegramMessageSender messageSender;
     private final KeyboardFactory keyboards;
     private final PulseBillingProperties billingProperties;
     private final UserSessionService sessionService;
+    private final PackageRepository packageRepository;
 
     public boolean handles(String callbackData) {
         return callbackData.startsWith(CallbackData.PREFIX_RESULT);
@@ -59,8 +74,17 @@ public class ResultCallbackHandler {
 
     public void handle(long chatId, int messageId, String callbackQueryId, String callbackData) {
         if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "lock:")
-                || callbackData.startsWith(CallbackData.PREFIX_RESULT + "draftlock:")) {
+                || callbackData.startsWith(CallbackData.PREFIX_RESULT + "draftlock:")
+                || callbackData.startsWith(CallbackData.PREFIX_RESULT + "idearegenlock:")) {
             messageSender.answerCallbackWithAlert(callbackQueryId, ConversionCopy.lockAlert());
+            if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "draftlock:")) {
+                messageSender.sendTextWithInlineSafe(
+                        chatId,
+                        ConversionCopy.draftPaywall(),
+                        keyboards.paymentPackagesInline(
+                                packageRepository.findByActiveTrueOrderBySortOrderAsc())
+                );
+            }
             return;
         }
         messageSender.answerCallback(callbackQueryId);
@@ -77,8 +101,16 @@ public class ResultCallbackHandler {
             handleBackToSection(chatId, messageId, callbackData);
             return;
         }
+        if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "ideapage:")) {
+            handleIdeaPage(chatId, messageId, callbackData);
+            return;
+        }
         if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "ideas:")) {
             handleIdeas(chatId, messageId, callbackData);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "idearegen:")) {
+            handleIdeasRegen(chatId, messageId, callbackData);
             return;
         }
         if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "charts:")) {
@@ -87,6 +119,14 @@ public class ResultCallbackHandler {
         }
         if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "draft:")) {
             handleDraft(chatId, messageId, callbackData);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "posts:")) {
+            handlePosts(chatId, messageId, callbackData);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "postview:")) {
+            handlePostView(chatId, messageId, callbackData);
             return;
         }
         log.debug("Unhandled result callback: {}", callbackData);
@@ -98,8 +138,7 @@ public class ResultCallbackHandler {
         if (sections.isEmpty()) {
             return;
         }
-        boolean teaser = isTeaserRequest(requestId);
-        editSectionMessage(chatId, messageId, requestId, sections, 0, teaser);
+        editSectionMessage(chatId, messageId, requestId, sections, 0, false);
     }
 
     private void handleStats(long chatId, int messageId, String callbackData) {
@@ -109,19 +148,20 @@ public class ResultCallbackHandler {
             return;
         }
 
+        ChannelEntity channel = refreshMetrics(ctx.channel());
         AnalysisMetrics metrics = analyticsService.analyze(
-                ctx.channel().getId(),
+                channel.getId(),
                 ctx.request().getPeriodFrom(),
                 ctx.request().getPeriodTo()
         );
-        ExternalChannelMetrics external = externalMetricsService.bestMetrics(ctx.channel().getUsername());
-        int subscribers = ctx.channel().getSubscriberCount() != null ? ctx.channel().getSubscriberCount() : 0;
+        ExternalChannelMetrics external = externalMetricsService.bestMetrics(channel.getUsername());
+        int subscribers = channel.getSubscriberCount() != null ? channel.getSubscriberCount() : 0;
         if (external.subscribers() != null && external.subscribers() > 0) {
             subscribers = external.subscribers();
         }
 
         String text = statsMessageBuilder.build(
-                requestId, ctx.channel().getTitle(), subscribers, metrics, external);
+                requestId, channel.getTitle(), subscribers, metrics, external);
         boolean teaser = isTeaserRequest(requestId);
         InlineKeyboardMarkup keyboard = keyboards.analysisSectionsInline(requestId, 0,
                 Math.max(snapshotService.getSections(requestId).size(), 1), teaser);
@@ -142,49 +182,121 @@ public class ResultCallbackHandler {
             return;
         }
 
-        boolean teaser = isTeaserRequest(requestId);
         if (DeepAnalysisSections.isIdeasFunnelIndex(index, sections.size())) {
-            handleIdeas(chatId, messageId, requestId, sections.size());
-            return;
-        }
-        if (teaser && index > 0 && index < sections.size() - 1) {
+            renderIdeasPage(chatId, messageId, requestId, 0);
             return;
         }
 
-        editSectionMessage(chatId, messageId, requestId, sections, index, teaser);
+        editSectionMessage(chatId, messageId, requestId, sections, index, false);
+    }
+
+    public void openIdeas(long chatId, long requestId) {
+        renderIdeasPage(chatId, 0, requestId, 0);
     }
 
     private void handleIdeas(long chatId, int messageId, String callbackData) {
         long requestId = parseRequestId(callbackData, "ideas:");
-        int sectionTotal = Math.max(snapshotService.getSections(requestId).size(), DeepAnalysisSections.sectionCount());
-        handleIdeas(chatId, messageId, requestId, sectionTotal);
+        renderIdeasPage(chatId, messageId, requestId, 0);
     }
 
-    private void handleIdeas(long chatId, int messageId, long requestId, int sectionTotal) {
+    private void handleIdeaPage(long chatId, int messageId, String callbackData) {
+        // result:ideapage:{requestId}:{page}
+        String tail = callbackData.substring((CallbackData.PREFIX_RESULT + "ideapage:").length());
+        int colon = tail.lastIndexOf(':');
+        if (colon <= 0) {
+            return;
+        }
+        long requestId = Long.parseLong(tail.substring(0, colon));
+        int page = Integer.parseInt(tail.substring(colon + 1));
+        renderIdeasPage(chatId, messageId, requestId, page);
+    }
+
+    private void renderIdeasPage(long chatId, int messageId, long requestId, int page) {
         RequestContext ctx = loadContext(requestId);
         if (ctx == null) {
             return;
         }
 
-        List<ContentIdeaEntity> ideas = ensureIdeas(ctx);
-        if (ideas.isEmpty()) {
+        List<ContentIdeaEntity> all = ensureIdeas(ctx);
+        if (all.isEmpty()) {
             messageSender.sendTextSafe(chatId, "❌ Не удалось сгенерировать идеи. Попробуйте позже.");
             return;
         }
+        List<ContentIdeaEntity> ideas = all.size() > IDEAS_POOL_MAX ? all.subList(0, IDEAS_POOL_MAX) : all;
+
+        int totalPages = (ideas.size() + IDEAS_PER_PAGE - 1) / IDEAS_PER_PAGE;
+        int p = Math.max(0, Math.min(page, totalPages - 1));
+        int start = p * IDEAS_PER_PAGE;
+        int end = Math.min(start + IDEAS_PER_PAGE, ideas.size());
+        List<ContentIdeaEntity> pageIdeas = ideas.subList(start, end);
 
         UserSession session = sessionService.getOrCreate(chatId);
-        int draftsLeft = ctx.freeTier() ? session.freeDraftsRemaining() : 99;
-        boolean teaser = isTeaserRequest(requestId);
-        String text = buildIdeasMessage(ctx.channel().getTitle(), ideas, ctx.freeTier(), draftsLeft);
-        List<Long> ideaIds = ideas.stream().limit(3).map(ContentIdeaEntity::getId).toList();
-        InlineKeyboardMarkup keyboard = keyboards.ideasFunnelInline(
-                requestId, sectionTotal, teaser, ideaIds, ctx.freeTier(), draftsLeft);
+        int draftLimit = billingProperties.draftLimitFor(ctx.request().getType());
+        int draftsLeft = billingProperties.isEnabled()
+                ? session.draftsRemaining(draftLimit)
+                : 99;
+        boolean locked = billingProperties.isEnabled() && ctx.freeTier() && draftsLeft <= 0;
+        int regenLimit = billingProperties.ideasRegenLimitFor(ctx.request().getType());
+        int regensLeft = session.ideasRegensRemaining(ctx.request().getId(), regenLimit);
+
+        String text = buildIdeasMessage(
+                ctx.channel().getTitle(), pageIdeas, start, p, totalPages, ctx.freeTier(), draftsLeft, regensLeft);
+        List<Long> pageIds = pageIdeas.stream().map(ContentIdeaEntity::getId).toList();
+        boolean showBatchPosts = billingProperties.isEnabled() && !ctx.freeTier();
+        InlineKeyboardMarkup keyboard = keyboards.ideasPageInline(
+                requestId, pageIds, start, p, totalPages, locked, showBatchPosts, true, regensLeft);
 
         if (messageId > 0) {
             messageSender.editText(chatId, messageId, text, keyboard);
         } else {
             messageSender.sendTextWithInlineSafe(chatId, text, keyboard);
         }
+    }
+
+    private void handleIdeasRegen(long chatId, int messageId, String callbackData) {
+        long requestId = parseRequestId(callbackData, "idearegen:");
+        RequestContext ctx = loadContext(requestId);
+        if (ctx == null) {
+            return;
+        }
+
+        UserSession session = sessionService.getOrCreate(chatId);
+        int regenLimit = billingProperties.ideasRegenLimitFor(ctx.request().getType());
+        if (session.ideasRegensRemaining(requestId, regenLimit) <= 0) {
+            messageSender.sendTextSafe(chatId,
+                    "🔄 Лимит обновления идей на этот разбор исчерпан. Новый пул — в следующем запросе.");
+            return;
+        }
+
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, "🔄 Генерирую новые идеи…", null);
+        } else {
+            messageSender.sendTextSafe(chatId, "🔄 Генерирую новые идеи…");
+        }
+
+        try {
+            AnalysisMetrics metrics = analyticsService.analyze(
+                    ctx.channel().getId(),
+                    ctx.request().getPeriodFrom(),
+                    ctx.request().getPeriodTo()
+            );
+            int count = Math.min(IDEAS_POOL_MAX, billingProperties.ideasFor(ctx.request().getType()));
+            List<ContentIdeaEntity> ideas = ideasGenerationService.generateIdeas(
+                    requestId,
+                    ctx.channel().getTitle(),
+                    metrics,
+                    count,
+                    analysisProperties.getLlmTimeoutSeconds()
+            );
+            snapshotService.replaceIdeas(requestId, ideas);
+            session.consumeIdeasRegen(requestId);
+        } catch (Exception ex) {
+            log.warn("Ideas regen failed for request {}: {}", requestId, ex.getMessage());
+            messageSender.sendTextSafe(chatId, "❌ Не удалось обновить идеи. Попробуйте позже.");
+            return;
+        }
+
+        renderIdeasPage(chatId, messageId, requestId, 0);
     }
 
     private void handleCharts(long chatId, String callbackData) {
@@ -194,12 +306,13 @@ public class ResultCallbackHandler {
             return;
         }
 
+        ChannelEntity channel = refreshMetrics(ctx.channel());
         AnalysisMetrics metrics = analyticsService.analyze(
-                ctx.channel().getId(),
+                channel.getId(),
                 ctx.request().getPeriodFrom(),
                 ctx.request().getPeriodTo()
         );
-        AnalysisChartPack charts = chartRenderer.render(ctx.channel().getTitle(), metrics);
+        AnalysisChartPack charts = chartRenderer.render(channel.getTitle(), metrics);
 
         List<TelegramMessageSender.AlbumPhoto> album = new ArrayList<>();
         album.add(new TelegramMessageSender.AlbumPhoto(charts.engagementHeatmap(), "🔥 <b>Активность по дням</b>"));
@@ -226,12 +339,11 @@ public class ResultCallbackHandler {
         }
 
         UserSession session = sessionService.getOrCreate(chatId);
-        if (ctx.freeTier() && !session.tryConsumeFreeDraft(ideaId, 3)) {
+        int draftLimit = billingProperties.draftLimitFor(ctx.request().getType());
+        if (billingProperties.isEnabled() && !session.tryConsumeFreeDraft(ideaId, draftLimit)) {
             String paywall = ConversionCopy.draftPaywall();
-            int sectionTotal = Math.max(snapshotService.getSections(requestId).size(), DeepAnalysisSections.sectionCount());
-            boolean teaser = isTeaserRequest(requestId);
-            InlineKeyboardMarkup keyboard = keyboards.draftResultInline(
-                    requestId, ideaId, sectionTotal, teaser, true, 0);
+            InlineKeyboardMarkup keyboard = keyboards.paymentPackagesInline(
+                    packageRepository.findByActiveTrueOrderBySortOrderAsc());
             if (messageId > 0) {
                 messageSender.editText(chatId, messageId, paywall, keyboard);
             } else {
@@ -246,6 +358,20 @@ public class ResultCallbackHandler {
                 .orElse(null);
         if (idea == null) {
             messageSender.sendTextSafe(chatId, "❌ Идея не найдена.");
+            return;
+        }
+
+        // Идея-опрос → нативный Telegram Poll, а не текстовый черновик.
+        if (PollDraftService.isPollFormat(idea.getFormat())) {
+            if (messageId > 0) {
+                messageSender.editText(chatId, messageId, "⏳ Собираю опрос…", null);
+            }
+            PollDraftService.PollDraft poll = pollDraftService.generate(ctx.channel().getTitle(), idea);
+            GeneratedPostEntity savedPoll = generatedPostService.savePollDraft(
+                    requestId, idea, poll.question(), poll.options(), true);
+            session.setPostId(savedPoll.getId());
+            session.setRequestId(requestId);
+            pollHandler.showPollBuilder(chatId, messageId, savedPoll, requestId);
             return;
         }
 
@@ -265,7 +391,13 @@ public class ResultCallbackHandler {
                 analysisProperties.getLlmTimeoutSeconds()
         );
 
-        int draftsLeft = ctx.freeTier() ? session.freeDraftsRemaining() : 99;
+        GeneratedPostEntity savedPost = generatedPostService.saveRegeneratedDraft(requestId, idea, draft);
+        session.setPostId(savedPost.getId());
+        session.setRequestId(requestId);
+
+        int draftsLeft = billingProperties.isEnabled()
+                ? session.draftsRemaining(draftLimit)
+                : 99;
         int sectionTotal = Math.max(snapshotService.getSections(requestId).size(), DeepAnalysisSections.sectionCount());
         boolean teaser = isTeaserRequest(requestId);
 
@@ -274,7 +406,102 @@ public class ResultCallbackHandler {
                 + TgHtml.fromMarkdown(draft)
                 + footerBlock(ctx.freeTier(), draftsLeft);
         InlineKeyboardMarkup keyboard = keyboards.draftResultInline(
-                requestId, ideaId, sectionTotal, teaser, ctx.freeTier(), draftsLeft);
+                requestId, ideaId, savedPost.getId(), sectionTotal, teaser, ctx.freeTier(), draftsLeft);
+
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, text, keyboard);
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, text, keyboard);
+        }
+    }
+
+    private void handlePosts(long chatId, int messageId, String callbackData) {
+        long requestId = parseRequestId(callbackData, "posts:");
+        RequestContext ctx = loadContext(requestId);
+        if (ctx == null) {
+            return;
+        }
+        if (ctx.freeTier()) {
+            messageSender.sendTextWithInlineSafe(
+                    chatId,
+                    ConversionCopy.draftPaywall(),
+                    keyboards.paymentPackagesInline(packageRepository.findByActiveTrueOrderBySortOrderAsc())
+            );
+            return;
+        }
+
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, "⏳ <b>Генерирую 7 постов…</b>\n\n<i>~1 минута</i>", null);
+        }
+
+        List<ContentIdeaEntity> ideas = ensureIdeas(ctx);
+        AnalysisMetrics metrics = analyticsService.analyze(
+                ctx.channel().getId(),
+                ctx.request().getPeriodFrom(),
+                ctx.request().getPeriodTo()
+        );
+        int postCount = billingProperties.getPaidDraftLimit();
+        List<GeneratedPostEntity> posts = postsGenerationService.generatePosts(
+                requestId,
+                ctx.channel().getTitle(),
+                ideas,
+                metrics,
+                postCount,
+                analysisProperties.getLlmTimeoutSeconds()
+        );
+
+        StringBuilder text = new StringBuilder();
+        text.append("📝 <b>7 готовых постов — «").append(TgHtml.esc(ctx.channel().getTitle())).append("»</b>\n\n");
+        int n = 1;
+        for (GeneratedPostEntity post : posts) {
+            String preview = generatedPostService.latestText(post);
+            if (preview.length() > 120) {
+                preview = preview.substring(0, 117) + "…";
+            }
+            text.append(n++).append(". ").append(TgHtml.esc(preview)).append("\n\n");
+        }
+        text.append("<i>Нажмите «Пост N» — откроется полный текст с публикацией.</i>");
+
+        InlineKeyboardMarkup keyboard = keyboards.generatedPostsInline(requestId, posts);
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, text.toString().trim(), keyboard);
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, text.toString().trim(), keyboard);
+        }
+    }
+
+    private void handlePostView(long chatId, int messageId, String callbackData) {
+        long postId = Long.parseLong(callbackData.substring((CallbackData.PREFIX_RESULT + "postview:").length()));
+        GeneratedPostEntity post = generatedPostService.findById(postId).orElse(null);
+        if (post == null) {
+            messageSender.sendTextSafe(chatId, "❌ Пост не найден.");
+            return;
+        }
+        RequestContext ctx = loadContext(post.getRequestId());
+        if (ctx == null) {
+            return;
+        }
+        ContentIdeaEntity idea = snapshotService.getIdeas(post.getRequestId()).stream()
+                .filter(i -> i.getId().equals(post.getIdeaId()))
+                .findFirst()
+                .orElse(null);
+        String ideaTitle = idea != null ? idea.getTitle() : "пост";
+        String draft = generatedPostService.latestText(post);
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setPostId(postId);
+        session.setRequestId(post.getRequestId());
+
+        int sectionTotal = Math.max(snapshotService.getSections(post.getRequestId()).size(), DeepAnalysisSections.sectionCount());
+        boolean teaser = isTeaserRequest(post.getRequestId());
+        String text = ConversionCopy.draftHeader(ideaTitle) + "\n\n" + TgHtml.fromMarkdown(draft);
+        InlineKeyboardMarkup keyboard = keyboards.draftResultInline(
+                post.getRequestId(),
+                post.getIdeaId(),
+                postId,
+                sectionTotal,
+                teaser,
+                ctx.freeTier(),
+                99);
 
         if (messageId > 0) {
             messageSender.editText(chatId, messageId, text, keyboard);
@@ -291,14 +518,7 @@ public class ResultCallbackHandler {
             return """
 
                     ━━━━━━━━━━━━━━━
-                    🔥 <b>Вы попробовали генерацию.</b>
-
-                    В полном запросе:
-                    • 12 идей вместо 3
-                    • 7 готовых постов с вариантами текста
-                    • все 5 разделов разбора
-
-                    <i>Один клик — и следующий пост уже не «с чистого листа».</i>""";
+                    """ + org.example.pulse_ai.text.SalesCopy.upsellAfterFreeAnalysis();
         }
         return "\n\n<i>Отредактируйте под себя и публикуйте.</i>";
     }
@@ -314,7 +534,7 @@ public class ResultCallbackHandler {
                     ctx.request().getPeriodFrom(),
                     ctx.request().getPeriodTo()
             );
-            int count = 3;
+            int count = Math.min(IDEAS_POOL_MAX, billingProperties.ideasFor(ctx.request().getType()));
             ideas = ideasGenerationService.generateIdeas(
                     ctx.request().getId(),
                     ctx.channel().getTitle(),
@@ -329,15 +549,33 @@ public class ResultCallbackHandler {
         return ideas;
     }
 
-    private String buildIdeasMessage(String channelTitle, List<ContentIdeaEntity> ideas, boolean freeTier, int draftsLeft) {
+    private String buildIdeasMessage(
+            String channelTitle,
+            List<ContentIdeaEntity> pageIdeas,
+            int globalStart,
+            int page,
+            int totalPages,
+            boolean freeTier,
+            int draftsLeft,
+            int ideasRegensLeft
+    ) {
         StringBuilder sb = new StringBuilder(ConversionCopy.ideasIntro(channelTitle, freeTier, draftsLeft));
+        if (ideasRegensLeft > 0) {
+            sb.append("\n<i>Не зашли идеи? «🔄 Новые идеи» — без списания запроса (осталось ")
+                    .append(ideasRegensLeft).append(").</i>");
+        }
         sb.append("\n\n");
-        int n = 1;
-        for (ContentIdeaEntity idea : ideas.stream().limit(3).toList()) {
+        int n = globalStart + 1;
+        for (ContentIdeaEntity idea : pageIdeas) {
             sb.append(ConversionCopy.ideaBlock(n++, idea.getTitle(), idea.getReason(), idea.getFormat(), idea.getSuggestedDay()));
             sb.append('\n');
         }
-        sb.append("<i>↓ Выберите идею и нажмите «Пост» — напишу текст</i>");
+        if (totalPages > 1) {
+            sb.append("<i>Стр. ").append(page + 1).append('/').append(totalPages)
+                    .append(" · листайте стрелками ниже, жмите «Пост N» — напишу текст.</i>");
+        } else {
+            sb.append("<i>↓ Выберите идею и нажмите «Пост» — напишу текст</i>");
+        }
         return sb.toString().trim();
     }
 
@@ -380,20 +618,17 @@ public class ResultCallbackHandler {
         sb.append("🧠 <b>Разбор канала</b>");
         sb.append(" <i>(").append(index + 1).append('/').append(total).append(")</i>\n\n");
         sb.append(TgHtml.fromMarkdown(section.body()));
-        if (teaserMode && index == 0) {
-            sb.append("\n\n<i>Дальше — кнопка «Идеи»: 3 темы и черновик поста.</i>");
-        }
         return sb.toString().trim();
     }
 
     private boolean isTeaserRequest(long requestId) {
-        if (!billingProperties.isEnabled()) {
-            return false;
-        }
-        return requestRepository.findById(requestId)
-                .map(AnalysisRequestEntity::getType)
-                .map(type -> type == RequestType.FREE)
-                .orElse(false);
+        return false;
+    }
+
+    /** Перед показом статистики — свежий sync + чистка мусорных просмотров. */
+    private ChannelEntity refreshMetrics(ChannelEntity channel) {
+        channelSyncService.syncForAnalysis(channel);
+        return channelRepository.findById(channel.getId()).orElse(channel);
     }
 
     private RequestContext loadContext(long requestId) {

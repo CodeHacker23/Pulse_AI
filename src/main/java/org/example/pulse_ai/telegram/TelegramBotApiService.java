@@ -26,6 +26,18 @@ public class TelegramBotApiService {
         this.bot = botProvider.getIfAvailable();
     }
 
+    public Optional<Chat> getChat(long telegramChatId) {
+        if (bot == null) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(bot.execute(GetChat.builder().chatId(telegramChatId).build()));
+        } catch (TelegramApiException ex) {
+            log.warn("getChat failed for {}: {}", telegramChatId, ex.getMessage());
+            return Optional.empty();
+        }
+    }
+
     public Optional<Chat> getChatByUsername(String username) {
         if (bot == null) {
             return Optional.empty();

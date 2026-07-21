@@ -59,6 +59,22 @@ public class ChannelEntity {
     @Column(name = "last_sync_at")
     private Instant lastSyncAt;
 
+    /** Привязанная группа обсуждений (комментарии). Заполняется автоматически при первом авто-форварде поста. */
+    @Column(name = "linked_discussion_chat_id")
+    private Long linkedDiscussionChatId;
+
+    /** Включён ли мини-агент, который ловит горячие лиды в комментариях. */
+    @Column(name = "lead_agent_enabled", nullable = false)
+    private boolean leadAgentEnabled = false;
+
+    /** База ответов админа (цены, доставка, оффер) — питает черновики ответов агента. */
+    @Column(name = "sales_faq", columnDefinition = "TEXT")
+    private String salesFaq;
+
+    /** Книга возражений: «дорого → …», рабочие формулировки админа. */
+    @Column(name = "sales_objections", columnDefinition = "TEXT")
+    private String salesObjections;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

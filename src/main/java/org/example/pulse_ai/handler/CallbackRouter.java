@@ -2,6 +2,7 @@ package org.example.pulse_ai.handler;
 
 import lombok.RequiredArgsConstructor;
 import org.example.pulse_ai.persistence.entity.UserEntity;
+import org.example.pulse_ai.telegram.TelegramMessageSender;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -14,10 +15,47 @@ public class CallbackRouter {
     private final PaymentHandler paymentHandler;
     private final HistoryHandler historyHandler;
     private final ResultCallbackHandler resultCallbackHandler;
+    private final PublishHandler publishHandler;
+    private final ProductChannelHandler productChannelHandler;
+    private final PerkHandler perkHandler;
+    private final FeatureHandler featureHandler;
+    private final ManagerHandler managerHandler;
+    private final PollHandler pollHandler;
+    private final TelegramMessageSender messageSender;
 
     public void route(long chatId, int messageId, String callbackQueryId, UserEntity user, String callbackData) {
+        if (callbackData.equals(CallbackData.MENU_MAIN)) {
+            messageSender.answerCallback(callbackQueryId);
+            menuHandler.showMainMenu(chatId, user);
+            return;
+        }
         if (callbackData.startsWith(CallbackData.PREFIX_RESULT)) {
             resultCallbackHandler.handle(chatId, messageId, callbackQueryId, callbackData);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_PERK)) {
+            perkHandler.handle(chatId, messageId, callbackQueryId, user, callbackData);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_FEAT)) {
+            featureHandler.handle(chatId, messageId, callbackQueryId, user, callbackData);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH)
+                || callbackData.startsWith(CallbackData.PREFIX_SCHEDULE)) {
+            publishHandler.handle(chatId, messageId, callbackQueryId, user, callbackData);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_PRODUCT)) {
+            productChannelHandler.handle(chatId, messageId, callbackQueryId, user, callbackData);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_AGENT)) {
+            managerHandler.handle(chatId, messageId, callbackQueryId, user, callbackData);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_POLL)) {
+            pollHandler.handle(chatId, messageId, callbackQueryId, user, callbackData);
             return;
         }
         route(chatId, user, callbackData);
@@ -39,6 +77,10 @@ public class CallbackRouter {
         if (callbackData.equals(CallbackData.CHANNEL_CONNECT)
                 || callbackData.equals(CallbackData.CHANNEL_CONNECT_LIMITED)) {
             channelHandler.showConnectInstructions(chatId);
+            return;
+        }
+        if (callbackData.equals(CallbackData.CHANNEL_CONNECT_PUBLISH)) {
+            channelHandler.showPublishConnectInstructions(chatId);
             return;
         }
         if (callbackData.equals(CallbackData.REQ_FREE)) {
@@ -65,7 +107,19 @@ public class CallbackRouter {
             historyHandler.showHistory(chatId, user);
             return;
         }
+        if (callbackData.startsWith(CallbackData.PREFIX_HIST + "open:")) {
+            long requestId = Long.parseLong(callbackData.substring((CallbackData.PREFIX_HIST + "open:").length()));
+            historyHandler.openReport(chatId, 0, user, requestId);
+            return;
+        }
 
         menuHandler.showMainMenu(chatId, user);
+    }
+
+    public void routeHistory(long chatId, int messageId, UserEntity user, String callbackData) {
+        if (callbackData.startsWith(CallbackData.PREFIX_HIST + "open:")) {
+            long requestId = Long.parseLong(callbackData.substring((CallbackData.PREFIX_HIST + "open:").length()));
+            historyHandler.openReport(chatId, messageId, user, requestId);
+        }
     }
 }

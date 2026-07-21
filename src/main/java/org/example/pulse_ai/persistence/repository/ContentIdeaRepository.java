@@ -8,4 +8,6 @@ import java.util.List;
 public interface ContentIdeaRepository extends JpaRepository<ContentIdeaEntity, Long> {
 
     List<ContentIdeaEntity> findByRequestIdOrderBySortOrderAsc(Long requestId);
+
+    void deleteByRequestId(Long requestId);
 }

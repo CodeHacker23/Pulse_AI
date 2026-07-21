@@ -39,4 +39,10 @@ public class PackageEntity {
 
     @Column(name = "sort_order", nullable = false)
     private short sortOrder;
+
+    @Column(name = "perk_choices_count", nullable = false)
+    private short perkChoicesCount;
+
+    @Column(name = "includes_priority", nullable = false)
+    private boolean includesPriority;
 }

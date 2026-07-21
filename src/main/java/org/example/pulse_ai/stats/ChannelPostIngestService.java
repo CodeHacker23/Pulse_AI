@@ -36,9 +36,22 @@ public class ChannelPostIngestService {
         ChannelPostEntity post = existing.orElseGet(ChannelPostEntity::new);
 
         String fullText = extractText(message);
-        int views = estimateViews(channel, fullText, messageId);
-        int reactions = 0;
-        int forwards = message.getForwardFromChat() != null ? 1 : 0;
+        // Bot API НЕ отдаёт счётчик просмотров. Не выдумываем цифры (иначе визуал врёт):
+        // сохраняем реальные просмотры, если они уже подтянуты скрапером t.me/s/, иначе 0 (неизвестно).
+        int views = existing.map(ChannelPostEntity::getViews)
+                .filter(v -> v != null && v > 0)
+                .orElse(0);
+        // Не тащим старые «оценённые» просмотры, если они невозможны для размера канала.
+        int subs = channel.getSubscriberCount() != null ? channel.getSubscriberCount() : 0;
+        if (views > 0 && !AnalyticsService.isPlausibleViews(views, subs)) {
+            views = 0;
+        }
+        int reactions = existing.map(ChannelPostEntity::getReactionsTotal)
+                .filter(r -> r != null && r > 0)
+                .orElse(0);
+        int forwards = existing.map(ChannelPostEntity::getForwards)
+                .filter(f -> f != null && f > 0)
+                .orElse(message.getForwardFromChat() != null ? 1 : 0);
 
         post.setChannelId(channel.getId());
         post.setTelegramMessageId(messageId);
@@ -69,17 +82,20 @@ public class ChannelPostIngestService {
 
         int reactions = Math.max(0, scraped.reactions());
         int forwards = Math.max(0, scraped.forwards());
+        int subs = channel.getSubscriberCount() != null ? channel.getSubscriberCount() : 0;
+        int existingViews = existing.map(p -> p.getViews() != null ? p.getViews() : 0).orElse(0);
+        int views = AnalyticsService.resolveViews(scraped.views(), existingViews, subs);
 
         post.setChannelId(channel.getId());
         post.setTelegramMessageId(scraped.messageId());
         post.setPublishedAt(scraped.publishedAt());
         post.setFullText(scraped.text());
         post.setTextPreview(truncate(scraped.text(), 500));
-        post.setViews(scraped.views());
+        post.setViews(views);
         post.setForwards(forwards);
         post.setReactionsTotal(reactions);
         post.setRepliesCount(0);
-        post.setEngagementRate(calculateEr(scraped.views(), reactions, forwards, 0));
+        post.setEngagementRate(calculateEr(views, reactions, forwards, 0));
         post.setMediaType(scraped.mediaType());
         post.setForwarded(scraped.forwarded());
         return post;
@@ -122,15 +138,6 @@ public class ChannelPostIngestService {
             return message.getCaption().trim();
         }
         return "Пост без текста";
-    }
-
-    private static int estimateViews(ChannelEntity channel, String text, int messageId) {
-        int subscribers = channel.getSubscriberCount() != null && channel.getSubscriberCount() > 0
-                ? channel.getSubscriberCount()
-                : 3_000;
-        double textFactor = Math.min(1.3, 0.7 + text.length() / 2000.0);
-        double variance = 0.75 + (Math.abs(messageId) % 50) / 100.0;
-        return (int) Math.max(150, subscribers * 0.09 * textFactor * variance);
     }
 
     private static BigDecimal calculateEr(int views, int reactions, int forwards, int replies) {

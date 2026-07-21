@@ -29,6 +29,7 @@ public class ChannelSyncService {
     private final TelegramBotApiService botApi;
     private final PulseAnalysisProperties analysisProperties;
     private final TgstatApiClient tgstatApiClient;
+    private final AnalyticsService analyticsService;
 
     @Transactional
     public SyncResult syncChannel(ChannelEntity channel) {
@@ -80,8 +81,12 @@ public class ChannelSyncService {
         }
 
         long total = postIngestService.countPosts(channel.getId());
+        int sanitized = analyticsService.sanitizeChannelPosts(channel.getId());
+        if (sanitized > 0) {
+            log.info("Sync канал {}: обнулено {} постов с невозможными просмотрами", channel.getId(), sanitized);
+        }
         log.info("Sync канал {}: +{} постов, всего {}", channel.getId(), ingested, total);
-        return new SyncResult(ingested, total, category);
+        return new SyncResult(ingested, total, category, sanitized);
     }
 
     private int ingestBatch(ChannelEntity channel, List<ScrapedChannelPost> posts) {
@@ -124,6 +129,9 @@ public class ChannelSyncService {
         }
     }
 
-    public record SyncResult(int newlyFetched, long totalPosts, String category) {
+    public record SyncResult(int newlyFetched, long totalPosts, String category, int sanitizedPosts) {
+        public SyncResult(int newlyFetched, long totalPosts, String category) {
+            this(newlyFetched, totalPosts, category, 0);
+        }
     }
 }

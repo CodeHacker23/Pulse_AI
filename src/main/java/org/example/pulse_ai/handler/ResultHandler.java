@@ -8,6 +8,7 @@ import org.example.pulse_ai.keyboard.KeyboardFactory;
 import org.example.pulse_ai.persistence.entity.ChannelEntity;
 import org.example.pulse_ai.persistence.entity.AnalysisRequestEntity;
 import org.example.pulse_ai.session.BotState;
+import org.example.pulse_ai.session.UserSession;
 import org.example.pulse_ai.session.UserSessionService;
 import org.example.pulse_ai.stats.model.AnalysisMetrics;
 import org.example.pulse_ai.telegram.TelegramMessageSender;
@@ -46,6 +47,7 @@ public class ResultHandler {
         sessionService.setState(chatId, BotState.REQUEST_RESULT);
         var session = sessionService.getOrCreate(chatId);
         session.setRequestId(requestId);
+        session.setLastRequestId(requestId);
         session.setFreeDraftsUsed(0);
 
         String caption = "📊 <b>" + TgHtml.esc(channel.getTitle()) + "</b>";
@@ -81,8 +83,9 @@ public class ResultHandler {
         resultCallbackHandler.sendSectionMessage(chatId, requestId, sections, teaserMode);
     }
 
-    /** Тихо возвращает в главное меню без лишнего сообщения «Меню:». */
+    /** Анализ завершён — оставляем requestId для навигации по разделам отчёта. */
     public void finishSession(long chatId) {
-        sessionService.resetToMainMenu(chatId);
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setState(BotState.REQUEST_RESULT);
     }
 }

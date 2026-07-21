@@ -13,14 +13,13 @@ public final class ConversionCopy {
             return """
                     🎯 <b>Отчёт готов — %s</b>
 
-                    Цифры вы уже видите. Дальше — то, ради чего приходят: <b>что публиковать</b> и <b>как это сформулировать</b>.
+                    Цифры и разбор — у вас. Дальше самое ценное: <b>что публиковать</b> и <b>как не слить охват</b>.
 
-                    • 🧠 Разбор канала — открыт 1 из 5 разделов
-                    • 💡 <b>%d идеи</b> под ваш стиль — <b>бесплатно</b>
-                    • ✍️ <b>3 черновика поста</b> — попробовать генерацию
-                    • 📈 Дополнительные графики
+                    • 🧠 все <b>5 секций</b> разбора
+                    • 💡 <b>%d идеи</b> под ваш стиль
+                    • ✍️ <b>3 черновика</b> — проверить голос бота
 
-                    <i>Один черновик — и вы почувствуете, насколько бот попадает в ваш голос.</i>
+                    <i>Один черновик — и вы поймёте, попадает ли бот в вашу аудиторию.</i>
                     """.formatted(TgHtml.b(channelTitle), ideaCount).trim();
         }
         return """
@@ -48,9 +47,9 @@ public final class ConversionCopy {
 
     public static String ideaBlock(int number, String title, String reason, String format, String day) {
         StringBuilder sb = new StringBuilder();
-        sb.append(TgHtml.b(number + ". " + TextHumanizer.humanize(title))).append('\n');
+        sb.append(TgHtml.b(number + ". " + TextHumanizer.humanize(title))).append("\n\n");
         if (reason != null && !reason.isBlank()) {
-            sb.append("<i>").append(TgHtml.esc(reason)).append("</i>\n");
+            sb.append(formatIdeaReason(reason)).append("\n\n");
         }
         if (day != null || format != null) {
             sb.append("📅 ");
@@ -68,6 +67,18 @@ public final class ConversionCopy {
         return sb.toString();
     }
 
+    private static String formatIdeaReason(String reason) {
+        String cleaned = TextHumanizer.humanize(reason.replace('\n', ' ').trim());
+        if (cleaned.isBlank()) {
+            return "";
+        }
+        String[] sentences = cleaned.split("(?<=[.!?])\\s+");
+        if (sentences.length <= 1) {
+            return TgHtml.fromMarkdown(cleaned);
+        }
+        return TgHtml.fromMarkdown(String.join("\n\n", sentences));
+    }
+
     public static String draftHeader(String ideaTitle) {
         return "✍️ <b>Черновик поста</b>\n<i>Идея: «" + TgHtml.esc(ideaTitle) + "»</i>";
     }
@@ -80,7 +91,7 @@ public final class ConversionCopy {
 
                 • 12 идей на 2 недели вперёд
                 • 7 готовых постов с вариантами
-                • полный разбор всех 5 разделов
+                • больше черновиков на запрос
 
                 <i>Следующий пост можно не писать с нуля.</i>""";
     }
@@ -102,7 +113,63 @@ public final class ConversionCopy {
         return "✍️ <b>Пишу черновик…</b>\n\n<i>Подстраиваюсь под стиль вашего канала.</i>";
     }
 
+    public static String publishPreview(String channelTitle, String postText) {
+        return """
+                📤 <b>Публикация в «%s»</b>
+
+                Текст поста:
+
+                %s
+
+                Опубликовать как есть?""".formatted(
+                TgHtml.esc(channelTitle),
+                TgHtml.fromMarkdown(postText)).trim();
+    }
+
+    public static String publishEditPrompt(String currentText) {
+        return """
+                ✏️ <b>Редактирование поста</b>
+
+                Текущий текст:
+                %s
+
+                <i>Отправьте новый текст одним сообщением.</i>""".formatted(
+                TgHtml.esc(currentText)).trim();
+    }
+
+    public static String publishInProgress(String channelTitle) {
+        return "⏳ Публикую в «" + TgHtml.esc(channelTitle) + "»…";
+    }
+
+    public static String publishSuccess(String channelTitle, String link) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("✅ <b>Пост опубликован!</b>\n\n");
+        sb.append("📢 ").append(TgHtml.esc(channelTitle));
+        if (link != null && !link.isBlank()) {
+            sb.append("\n🔗 <a href=\"").append(TgHtml.esc(link)).append("\">Открыть пост</a>");
+        }
+        sb.append("\n\n<i>Хотите сгенерировать ещё один пост из этого отчёта?</i>");
+        return sb.toString();
+    }
+
+    public static String publishFailed(String reason) {
+        return """
+                ❌ <b>Не удалось опубликовать</b>
+
+                %s
+
+                Текст поста сохранён — попробуйте снова или отредактируйте.""".formatted(
+                TgHtml.esc(reason != null ? reason : "Проверьте права бота в канале.")).trim();
+    }
+
+    public static String publishBlocked(String reason) {
+        return """
+                📤 <b>Публикация недоступна</b>
+
+                %s""".formatted(TgHtml.esc(reason)).trim();
+    }
+
     public static String lockAlert() {
-        return "🔒 Этот раздел — в полном запросе.\n\nБесплатно: «Главное» + «Идеи» с 3 генерациями поста.";
+        return "🔒 Этот раздел временно недоступен. Попробуйте позже.";
     }
 }

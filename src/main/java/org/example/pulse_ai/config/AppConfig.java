@@ -12,7 +12,11 @@ import org.springframework.context.annotation.Configuration;
         PulseAiProperties.class,
         PulseAnalysisProperties.class,
         PulseBillingProperties.class,
-        PulseExternalProperties.class
+        PulseExternalProperties.class,
+        PulseProductChannelProperties.class,
+        PulseImageProperties.class,
+        PulseOutreachProperties.class,
+        PulseScoutProperties.class
 })
 public class AppConfig {
 

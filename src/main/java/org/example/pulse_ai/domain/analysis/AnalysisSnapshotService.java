@@ -11,6 +11,7 @@ import org.example.pulse_ai.persistence.repository.AnalysisRequestRepository;
 import org.example.pulse_ai.persistence.repository.AnalysisSnapshotRepository;
 import org.example.pulse_ai.persistence.repository.ContentIdeaRepository;
 import org.example.pulse_ai.stats.model.AnalysisMetrics;
+import org.example.pulse_ai.stats.model.PublishSlotMetric;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -82,6 +83,12 @@ public class AnalysisSnapshotService {
         ideaRepository.saveAll(ideas);
     }
 
+    @Transactional
+    public void replaceIdeas(Long requestId, List<ContentIdeaEntity> ideas) {
+        ideaRepository.deleteByRequestId(requestId);
+        ideaRepository.saveAll(ideas);
+    }
+
     @Transactional(readOnly = true)
     public AnalysisSnapshotEntity getSnapshot(Long requestId) {
         return snapshotRepository.findById(requestId).orElse(null);
@@ -90,5 +97,21 @@ public class AnalysisSnapshotService {
     @Transactional(readOnly = true)
     public List<ContentIdeaEntity> getIdeas(Long requestId) {
         return ideaRepository.findByRequestIdOrderBySortOrderAsc(requestId);
+    }
+
+    /** Лучшие слоты публикации (по охвату) из сохранённого анализа. Первый — самый сильный. */
+    @Transactional(readOnly = true)
+    public List<PublishSlotMetric> getBestSlots(Long requestId) {
+        AnalysisSnapshotEntity snapshot = snapshotRepository.findById(requestId).orElse(null);
+        if (snapshot == null || snapshot.getBestPublishSlotsJson() == null) {
+            return List.of();
+        }
+        try {
+            return objectMapper.readValue(
+                    snapshot.getBestPublishSlotsJson(),
+                    new TypeReference<List<PublishSlotMetric>>() {});
+        } catch (Exception ex) {
+            return List.of();
+        }
     }
 }

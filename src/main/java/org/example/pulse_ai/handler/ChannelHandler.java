@@ -23,21 +23,28 @@ public class ChannelHandler {
     private final UserSessionService sessionService;
     private final TelegramMessageSender messageSender;
     private final KeyboardFactory keyboards;
+    private final RequestHandler requestHandler;
 
     public void showConnectInstructions(long chatId) {
         sessionService.setState(chatId, BotState.CONNECT_CHANNEL);
         messageSender.sendTextWithInline(chatId, BotMessages.CONNECT_CHANNEL, keyboards.backToMainInline());
     }
 
+    public void showPublishConnectInstructions(long chatId) {
+        sessionService.setState(chatId, BotState.CONNECT_CHANNEL);
+        messageSender.sendTextWithInline(chatId, BotMessages.CONNECT_PUBLISH_CHANNEL, keyboards.backToMainInline());
+    }
+
     public void handleConnectInput(long chatId, UserEntity user, Message message) {
         try {
             ChannelEntity channel;
-            if (message.getForwardFromChat() != null) {
+            boolean fromForward = message.getForwardFromChat() != null;
+            if (fromForward) {
                 channel = channelService.connectFromForward(user, message);
             } else if (message.hasText()) {
                 channel = channelService.connectPublicChannel(user, message.getText().trim());
             } else {
-                messageSender.sendText(chatId, "Отправьте ссылку на канал или @username (например, https://t.me/durov).");
+                messageSender.sendText(chatId, "Отправьте ссылку на канал или перешлите пост из своего канала.");
                 return;
             }
 
@@ -46,12 +53,15 @@ public class ChannelHandler {
 
             ChannelSyncService.SyncResult sync = channelSyncService.syncChannel(channel);
             int subscribers = channel.getSubscriberCount() != null ? channel.getSubscriberCount() : 0;
+            boolean canPublish = channel.isCanPostMessages();
 
             messageSender.sendTextWithInline(
                     chatId,
-                    BotMessages.channelConnected(channel.getTitle(), subscribers, sync.totalPosts()),
-                    keyboards.channelConnectedInline()
+                    BotMessages.channelConnected(channel.getTitle(), subscribers, sync.totalPosts(), canPublish),
+                    canPublish ? keyboards.backToMainInline() : keyboards.channelConnectedInline()
             );
+
+            requestHandler.startFreeAnalysis(chatId, user);
         } catch (ChannelConnectException ex) {
             messageSender.sendTextWithInline(
                     chatId,

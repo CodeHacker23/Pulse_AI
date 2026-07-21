@@ -75,8 +75,12 @@ public class AnalysisChartRenderer {
         g.setColor(MUTED);
         g.drawString(channelTitle, 48, 92);
 
+        boolean hasViews = metrics.avgViews() > 0;
         drawKpiCard(g, 48, 130, 260, 120, "Средние просмотры",
-                formatNumber(metrics.avgViews()), formatDelta(metrics.viewsDeltaPercent()) + " к прошлому периоду", ACCENT);
+                hasViews ? formatNumber(metrics.avgViews()) : "н/д",
+                hasViews ? formatDelta(metrics.viewsDeltaPercent()) + " к прошлому периоду"
+                        : "просмотры доступны только у публичных каналов",
+                ACCENT);
         boolean hasErr = errPercent != null && errPercent > 0;
         boolean hasReach = reachPercent != null && reachPercent > 0;
         String engLabel;

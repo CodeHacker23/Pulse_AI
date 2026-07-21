@@ -29,13 +29,24 @@ public class UpdateHandler {
     private final MenuHandler menuHandler;
     private final ChannelHandler channelHandler;
     private final ChannelService channelService;
-    private final HistoryHandler historyHandler;
     private final PaymentHandler paymentHandler;
     private final CallbackRouter callbackRouter;
     private final ChannelSyncService channelSyncService;
     private final AnalysisRequestService analysisRequestService;
+    private final PublishHandler publishHandler;
+    private final ProductChannelHandler productChannelHandler;
+    private final FeatureHandler featureHandler;
+    private final ManagerHandler managerHandler;
+    private final AdRadarHandler adRadarHandler;
+    private final OutreachHandler outreachHandler;
+    private final PollHandler pollHandler;
+    private final org.example.pulse_ai.domain.lead.CommentLeadAgent commentLeadAgent;
 
     public void handle(Update update) {
+        if (update.hasPreCheckoutQuery()) {
+            handlePreCheckout(update);
+            return;
+        }
         if (update.hasCallbackQuery()) {
             handleCallback(update.getCallbackQuery());
             return;
@@ -48,20 +59,64 @@ public class UpdateHandler {
             channelSyncService.ingestLiveChannelPost(update.getEditedChannelPost());
             return;
         }
-        if (!update.hasMessage() || update.getMessage().getFrom() == null) {
+        if (!update.hasMessage()) {
             return;
         }
         Message message = update.getMessage();
+        if (message.getChat() != null
+                && (message.getChat().isGroupChat() || message.getChat().isSuperGroupChat())) {
+            commentLeadAgent.handleGroupMessage(message);
+            return;
+        }
+        if (message.getFrom() == null) {
+            return;
+        }
         long chatId = message.getChatId();
         UserEntity user = userService.findOrCreate(message.getFrom());
 
         if (message.getForwardFromChat() != null) {
-            handleConnectInput(chatId, user, message);
+            UserSession session = sessionService.getOrCreate(chatId);
+            syncSessionWithDb(chatId, user, session);
+            if (session.getState() == BotState.CONNECT_CHANNEL) {
+                handleConnectInput(chatId, user, message);
+                return;
+            }
+            Optional<ChannelEntity> active = userService.findActiveChannel(user);
+            if (active.isPresent()
+                    && active.get().getTelegramChatId().equals(message.getForwardFromChat().getId())) {
+                handleConnectInput(chatId, user, message);
+                return;
+            }
+            if ("channel".equals(message.getForwardFromChat().getType())) {
+                handleConnectInput(chatId, user, message);
+                return;
+            }
+            if (message.hasText() || (message.getCaption() != null && !message.getCaption().isBlank())) {
+                featureHandler.handleForwardedPost(chatId, user, message);
+                return;
+            }
+            messageSender.sendText(chatId, "Перешлите пост с текстом — или любой пост из своего канала, если бот там админ.");
             return;
         }
         if (message.hasText()) {
             handleText(chatId, user, message.getText().trim(), message);
+            return;
         }
+        if (message.hasSuccessfulPayment()) {
+            paymentHandler.handleSuccessfulPayment(user, message.getSuccessfulPayment());
+        }
+    }
+
+    private void handlePreCheckout(Update update) {
+        var query = update.getPreCheckoutQuery();
+        if (query.getFrom() == null) {
+            return;
+        }
+        paymentHandler.handlePreCheckout(
+                query.getId(),
+                query.getInvoicePayload(),
+                query.getFrom().getId()
+        );
     }
 
     private void handleCallback(CallbackQuery callbackQuery) {
@@ -75,7 +130,25 @@ public class UpdateHandler {
         syncSessionWithDb(chatId, user, sessionService.getOrCreate(chatId));
 
         String data = callbackQuery.getData();
-        if (data != null && data.startsWith(CallbackData.PREFIX_RESULT)) {
+        if (data != null && (data.startsWith(CallbackData.PREFIX_RESULT)
+                || data.startsWith(CallbackData.PREFIX_PUBLISH)
+                || data.startsWith(CallbackData.PREFIX_SCHEDULE)
+                || data.startsWith(CallbackData.PREFIX_PRODUCT)
+                || data.startsWith(CallbackData.PREFIX_PERK)
+                || data.startsWith(CallbackData.PREFIX_FEAT)
+                || data.startsWith(CallbackData.PREFIX_AGENT)
+                || data.startsWith(CallbackData.PREFIX_POLL)
+                || data.startsWith(CallbackData.PREFIX_HIST + "open:")
+                || CallbackData.MENU_MAIN.equals(data))) {
+            if (data.startsWith(CallbackData.PREFIX_HIST + "open:")) {
+                messageSender.answerCallback(callbackQuery.getId());
+                callbackRouter.routeHistory(chatId, messageId, user, data);
+                return;
+            }
+            if (CallbackData.MENU_MAIN.equals(data)) {
+                callbackRouter.route(chatId, messageId, callbackQuery.getId(), user, data);
+                return;
+            }
             callbackRouter.route(chatId, messageId, callbackQuery.getId(), user, data);
             return;
         }
@@ -110,31 +183,170 @@ public class UpdateHandler {
             menuHandler.showHowItWorks(chatId);
             return;
         }
-        if (MenuText.CMD_BALANCE.equals(text)) {
-            menuHandler.showBalance(chatId, user);
-            return;
-        }
-        if (MenuText.CMD_HISTORY.equals(text) || MenuText.BTN_REPORTS.equals(text)) {
-            historyHandler.showHistory(chatId, user);
-            return;
-        }
-        if (MenuText.CMD_CHANNEL.equals(text) || MenuText.BTN_SETTINGS.equals(text)
-                || MenuText.BTN_ANALYZE.equals(text)) {
-            channelHandler.showConnectInstructions(chatId);
+        if (MenuText.BTN_CONNECT_PUBLISH.equals(text)) {
+            channelHandler.showPublishConnectInstructions(chatId);
             return;
         }
         if (MenuText.BTN_BUY.equals(text)) {
             paymentHandler.showPackages(chatId);
             return;
         }
+        if (MenuText.CMD_PRODUCT.equals(text)) {
+            productChannelHandler.showMenu(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_BALANCE.equals(text)) {
+            menuHandler.showBalance(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_HISTORY.equals(text) || MenuText.BTN_REPORTS.equals(text)
+                || MenuText.BTN_ANALYTICS.equals(text)) {
+            menuHandler.showAnalyticsHub(chatId, user);
+            return;
+        }
+        if (MenuText.BTN_CONTENT.equals(text)) {
+            menuHandler.showContentHub(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_SCHEDULED.equals(text) || MenuText.BTN_SCHEDULED.equals(text)) {
+            publishHandler.openScheduledList(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_MANAGER.equals(text) || MenuText.BTN_MANAGER.equals(text)) {
+            managerHandler.open(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_CHANNEL.equals(text) || MenuText.BTN_SETTINGS.equals(text)) {
+            menuHandler.showSettings(chatId, user);
+            return;
+        }
+        if (MenuText.BTN_ANALYZE.equals(text)) {
+            if (userService.findActiveChannel(user).isPresent()) {
+                if (analysisRequestService.hasActiveRequest(user.getId())) {
+                    messageSender.sendText(chatId, BotMessages.ANALYSIS_IN_PROGRESS);
+                } else {
+                    callbackRouter.route(chatId, user, CallbackData.REQ_FREE);
+                }
+            } else {
+                messageSender.sendText(chatId, "Пришлите ссылку на канал в чат — например t.me/durov");
+            }
+            return;
+        }
 
-        if (session.getState() == BotState.CONNECT_CHANNEL) {
+        if (session.getState() == BotState.COMPETITOR_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите ссылку на канал конкурента.");
+                return;
+            }
+            featureHandler.handleCompetitorInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.SELLING_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Опишите, что продаём — одним сообщением.");
+                return;
+            }
+            featureHandler.handleSellingInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.SCHEDULE_TIME_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите дату и время: ДД.ММ ЧЧ:ММ (МСК).");
+                return;
+            }
+            publishHandler.handleScheduleTimeInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.AGENT_REPLY_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Напишите текст ответа клиенту одним сообщением.");
+                return;
+            }
+            managerHandler.handleCustomReplyInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.AGENT_FAQ_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите факты для ответов (цены, доставка, оффер).");
+                return;
+            }
+            managerHandler.handleFaqInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.AGENT_OBJECTIONS_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите формулировки возражений одним сообщением.");
+                return;
+            }
+            managerHandler.handleObjectionsInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.AD_RADAR_WATCH_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите ссылку на чат или @username.");
+                return;
+            }
+            adRadarHandler.handleWatchInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.AD_RADAR_PLACE_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите @username публичного канала.");
+                return;
+            }
+            adRadarHandler.handlePlaceInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.OUTREACH_SOURCE_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите @username или ссылку на группу.");
+                return;
+            }
+            outreachHandler.handleSourceInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.OUTREACH_MESSAGE_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Напишите текст первого сообщения.");
+                return;
+            }
+            outreachHandler.handleMessageInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.OUTREACH_IMPORT_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите @username (каждый с новой строки).");
+                return;
+            }
+            outreachHandler.handleImportInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.POLL_OPTIONS_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите варианты по одному на строку (минимум 2).");
+                return;
+            }
+            pollHandler.handleCustomOptionsInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.CONNECT_CHANNEL || looksLikeChannelLink(text)) {
             handleConnectInput(chatId, user, message);
             return;
         }
         if (session.getState() == BotState.POST_EDIT) {
-            messageSender.sendText(chatId, BotMessages.FEATURE_COMING_SOON);
-            sessionService.resetToMainMenu(chatId);
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Отправьте текст поста одним сообщением.");
+                return;
+            }
+            publishHandler.handleEditedText(chatId, user, text);
+            return;
+        }
+        if (session.getState() == BotState.PRODUCT_EDIT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Отправьте текст поста одним сообщением.");
+                return;
+            }
+            productChannelHandler.handleEditedText(chatId, user, text);
             return;
         }
 
@@ -171,5 +383,15 @@ public class UpdateHandler {
     private static boolean isRunningAnalysis(UserSession session) {
         return session.getState() == BotState.FREE_ANALYSIS_RUNNING
                 || session.getState() == BotState.REQUEST_RUNNING;
+    }
+
+    private static boolean looksLikeChannelLink(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String t = text.trim().toLowerCase();
+        return t.startsWith("@")
+                || t.contains("t.me/")
+                || t.contains("telegram.me/");
     }
 }

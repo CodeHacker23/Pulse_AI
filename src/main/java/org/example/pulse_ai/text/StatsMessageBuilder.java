@@ -24,8 +24,12 @@ public class StatsMessageBuilder {
             sb.append("• Подписчиков: <b>").append(formatCompact(subscribers)).append("</b>\n");
         }
         sb.append("• Постов: <b>").append(metrics.postCount()).append("</b>\n");
-        sb.append("• Средние просмотры: <b>").append(metrics.avgViews()).append("</b>");
-        sb.append(" (").append(formatDelta(metrics.viewsDeltaPercent())).append(")\n");
+        if (metrics.avgViews() > 0) {
+            sb.append("• Средние просмотры: <b>").append(metrics.avgViews()).append("</b>");
+            sb.append(" (").append(formatDelta(metrics.viewsDeltaPercent())).append(")\n");
+        } else {
+            sb.append("• Средние просмотры: <b>н/д</b> <i>(нет достоверных данных)</i>\n");
+        }
 
         Integer extReach = external != null ? external.avgReach() : null;
         if (extReach != null && extReach > 0) {
@@ -35,7 +39,7 @@ public class StatsMessageBuilder {
                 sb.append("• Охват: <b>").append(formatOneDecimal(reach)).append("%</b> ")
                         .append("<i>").append(reachLabel(reach)).append("</i>\n");
             }
-        } else if (subscribers > 0) {
+        } else if (subscribers > 0 && metrics.avgViews() > 0) {
             double reach = metrics.avgViews() * 100.0 / subscribers;
             sb.append("• Охват: <b>").append(formatOneDecimal(reach)).append("%</b> ")
                     .append("<i>").append(reachLabel(reach)).append("</i>\n");
@@ -59,7 +63,11 @@ public class StatsMessageBuilder {
             for (PostMetric post : metrics.topPosts()) {
                 sb.append("<b>").append(i++).append(".</b> <i>")
                         .append(TgHtml.esc(cleanTitle(post.title()))).append("</i>");
-                sb.append(" — <b>").append(post.views()).append("</b> 👁\n");
+                if (post.views() > 0) {
+                    sb.append(" — <b>").append(post.views()).append("</b> 👁\n");
+                } else {
+                    sb.append(" — <b>н/д</b> 👁\n");
+                }
             }
             sb.append('\n');
         }
@@ -67,8 +75,12 @@ public class StatsMessageBuilder {
         if (!metrics.bestSlots().isEmpty()) {
             sb.append("⏰ <b>Лучшее время</b>\n");
             for (PublishSlotMetric slot : metrics.bestSlots()) {
-                sb.append("• ").append(TgHtml.esc(slot.day())).append(' ').append(TgHtml.esc(slot.time()))
-                        .append(" — <b>").append(slot.avgViews()).append("</b> 👁\n");
+                sb.append("• ").append(TgHtml.esc(slot.day())).append(' ').append(TgHtml.esc(slot.time()));
+                if (slot.avgViews() > 0) {
+                    sb.append(" — <b>").append(slot.avgViews()).append("</b> 👁\n");
+                } else {
+                    sb.append(" — <b>н/д</b> 👁\n");
+                }
             }
             sb.append('\n');
         }
@@ -77,8 +89,11 @@ public class StatsMessageBuilder {
             sb.append("🏷 <b>Темы</b>\n");
             for (TopicMetric topic : metrics.workingTopics()) {
                 sb.append("• ").append(TgHtml.esc(topic.topic()))
-                        .append(" <i>(").append(topic.postCount()).append(" · ~")
-                        .append(topic.avgViews()).append(" 👁)</i>\n");
+                        .append(" <i>(").append(topic.postCount());
+                if (topic.avgViews() > 0) {
+                    sb.append(" · ~").append(topic.avgViews()).append(" 👁");
+                }
+                sb.append(")</i>\n");
             }
         }
 

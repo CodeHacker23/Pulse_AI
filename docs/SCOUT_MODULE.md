@@ -135,7 +135,6 @@ scout:
 - Детект: `FloodWait`, `USER_BANNED_IN_CHANNEL`, `PEER_FLOOD`, отсутствие `getUpdates`.
 - Аккаунт → статус `scout_accounts.status = BANNED` или `FLOOD_WAIT`.
 - **Авто-пауза** outreach на этом аккаунте на `retry_after` + буфер.
-
 ### 5.3. Интеграция с антиспам-ботом Telegram
 
 > В Telegram есть служебные боты (напр. `@SpamBot`), куда нужно написать `/start` после ограничений.

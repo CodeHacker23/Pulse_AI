@@ -11,6 +11,8 @@ public interface AnalysisRequestRepository extends JpaRepository<AnalysisRequest
 
     List<AnalysisRequestEntity> findTop10ByUserIdOrderByCreatedAtDesc(Long userId);
 
+    List<AnalysisRequestEntity> findTop1ByUserIdAndStatusOrderByCreatedAtDesc(Long userId, RequestStatus status);
+
     boolean existsByUserIdAndStatusIn(Long userId, Collection<RequestStatus> statuses);
 
     List<AnalysisRequestEntity> findByUserIdAndStatusIn(Long userId, Collection<RequestStatus> statuses);

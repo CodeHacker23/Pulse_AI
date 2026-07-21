@@ -9,6 +9,8 @@ public interface ChannelRepository extends JpaRepository<ChannelEntity, Long> {
 
     Optional<ChannelEntity> findByTelegramChatId(Long telegramChatId);
 
+    Optional<ChannelEntity> findByLinkedDiscussionChatId(Long linkedDiscussionChatId);
+
     Optional<ChannelEntity> findByOwnerUserIdAndConnectionStatus(
             Long ownerUserId,
             org.example.pulse_ai.domain.channel.ConnectionStatus connectionStatus

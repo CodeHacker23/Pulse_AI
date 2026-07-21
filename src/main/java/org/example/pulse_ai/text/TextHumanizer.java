@@ -18,7 +18,11 @@ public final class TextHumanizer {
         s = s.replace("\u2039", "").replace("\u203A", "");
         s = s.replace('\u2014', '-').replace('\u2013', '-');
         s = s.replace("\u2026", "...");
-        s = s.replaceAll("\\s{2,}", " ");
+        // Нормализуем переносы строк, НЕ схлопывая абзацы (иначе пост превращается в кашу).
+        s = s.replace("\r\n", "\n").replace('\r', '\n');
+        s = s.replaceAll("[ \t\u00A0]{2,}", " "); // лишние пробелы/табы — но не переносы строк
+        s = s.replaceAll(" *\n *", "\n");          // убираем пробелы по краям строк
+        s = s.replaceAll("\n{3,}", "\n\n");        // максимум одна пустая строка между абзацами
         return s.trim();
     }
 }

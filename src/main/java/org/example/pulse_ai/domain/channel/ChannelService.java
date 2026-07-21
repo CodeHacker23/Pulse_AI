@@ -80,14 +80,7 @@ public class ChannelService {
         saved.setCanViewStats(adminStatus.canViewStats());
         channelRepository.save(saved);
 
-        ChannelSyncService.SyncResult sync = channelSyncService.syncChannel(saved);
-        if (sync.totalPosts() == 0) {
-            throw new ChannelConnectException(
-                    "Канал подключён, но посты пока не найдены.\n"
-                            + "Убедитесь, что канал публичный (есть @username) — бот подтянет историю автоматически.\n"
-                            + "Новые посты будут собираться сами, пока бот админ.");
-        }
-
+        channelSyncService.syncChannel(saved);
         return channelRepository.findById(saved.getId()).orElse(saved);
     }
 
@@ -106,6 +99,52 @@ public class ChannelService {
         Long chatId = null;
         String title = null;
         String resolvedUsername = username;
+        TelegramBotApiService.BotAdminStatus adminStatus = null;
+        Chat chat = botApi.getChatByUsername(username).orElse(null);
+        if (chat != null) {
+            chatId = chat.getId();
+            title = chat.getTitle();
+            if (chat.getUserName() != null) {
+                resolvedUsername = chat.getUserName();
+            }
+            adminStatus = botApi.verifyBotIsAdmin(chat.getId());
+        }
+        if (chatId == null) {
+            // канал не резолвится через Bot API — работаем только по скрапингу
+            chatId = syntheticChatId(username);
+        }
+
+        ChannelEntity saved = saveChannel(user, chatId, title != null ? title : "@" + username, resolvedUsername);
+        if (adminStatus != null) {
+            saved.setBotIsAdmin(adminStatus.isAdmin());
+            saved.setCanPostMessages(adminStatus.canPost());
+            saved.setCanViewStats(adminStatus.canViewStats());
+        } else {
+            saved.setBotIsAdmin(false);
+            saved.setCanPostMessages(false);
+            saved.setCanViewStats(false);
+        }
+        channelRepository.save(saved);
+
+        channelSyncService.syncChannel(saved);
+        return channelRepository.findById(saved.getId()).orElse(saved);
+    }
+
+    /**
+     * Скрейпит публичный канал для сравнения (перк «Анализ конкурента»),
+     * НЕ меняя активный канал пользователя. Возвращает персистентную запись с загруженными постами.
+     */
+    @Transactional
+    public ChannelEntity resolveForComparison(String rawInput) {
+        String username = normalizeUsername(rawInput);
+        if (!CHANNEL_USERNAME.matcher(username).matches()) {
+            throw new ChannelConnectException(
+                    "Некорректная ссылка. Пример: @durov или https://t.me/durov");
+        }
+
+        Long chatId = null;
+        String title = null;
+        String resolvedUsername = username;
         Chat chat = botApi.getChatByUsername(username).orElse(null);
         if (chat != null) {
             chatId = chat.getId();
@@ -115,23 +154,31 @@ public class ChannelService {
             }
         }
         if (chatId == null) {
-            // канал не резолвится через Bot API — работаем только по скрапингу
             chatId = syntheticChatId(username);
         }
 
-        ChannelEntity saved = saveChannel(user, chatId, title != null ? title : "@" + username, resolvedUsername);
-        saved.setBotIsAdmin(false);
-        saved.setCanPostMessages(false);
-        saved.setCanViewStats(false);
-        channelRepository.save(saved);
+        ChannelEntity channel = channelRepository.findByTelegramChatId(chatId)
+                .orElseGet(ChannelEntity::new);
+        channel.setTelegramChatId(chatId);
+        channel.setTitle(title != null ? title : "@" + username);
+        channel.setUsername(resolvedUsername);
+        if (channel.getOwnerUserId() == null) {
+            channel.setOwnerUserId(0L);
+        }
+        channel.setConnectionStatus(ConnectionStatus.ACTIVE);
+        if (channel.getSubscriberCount() == null) {
+            channel.setSubscriberCount(0);
+        }
+        ChannelEntity saved = channelRepository.save(channel);
 
-        ChannelSyncService.SyncResult sync = channelSyncService.syncChannel(saved);
-        if (sync.totalPosts() == 0) {
+        channelSyncService.syncForAnalysis(saved);
+        ChannelEntity refreshed = channelRepository.findById(saved.getId()).orElse(saved);
+        if (postIngestService.countPosts(refreshed.getId()) == 0) {
             throw new ChannelConnectException(
                     "Не удалось получить посты канала @" + username + ".\n"
-                            + "Проверьте, что канал публичный (открывается по ссылке t.me/" + username + ").");
+                            + "Проверьте, что канал публичный (открывается по t.me/" + username + ").");
         }
-        return channelRepository.findById(saved.getId()).orElse(saved);
+        return refreshed;
     }
 
     private static long syntheticChatId(String username) {

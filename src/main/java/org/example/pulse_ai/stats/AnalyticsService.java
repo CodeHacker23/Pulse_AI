@@ -2,8 +2,10 @@ package org.example.pulse_ai.stats;
 
 import lombok.RequiredArgsConstructor;
 import org.example.pulse_ai.config.PulseAnalysisProperties;
+import org.example.pulse_ai.persistence.entity.ChannelEntity;
 import org.example.pulse_ai.persistence.entity.ChannelPostEntity;
 import org.example.pulse_ai.persistence.repository.ChannelPostRepository;
+import org.example.pulse_ai.persistence.repository.ChannelRepository;
 import org.example.pulse_ai.stats.model.AnalysisMetrics;
 import org.example.pulse_ai.stats.model.DailyViewsPoint;
 import org.example.pulse_ai.stats.model.PostMetric;
@@ -33,6 +35,7 @@ public class AnalyticsService {
     private static final Locale RU = Locale.forLanguageTag("ru");
 
     private final ChannelPostRepository channelPostRepository;
+    private final ChannelRepository channelRepository;
     private final PulseAnalysisProperties analysisProperties;
 
     public List<ChannelPostEntity> loadPosts(Long channelId, LocalDate periodFrom, LocalDate periodTo) {
@@ -42,17 +45,21 @@ public class AnalyticsService {
     }
 
     public AnalysisMetrics analyze(Long channelId, LocalDate periodFrom, LocalDate periodTo) {
+        sanitizeChannelPosts(channelId);
         List<ChannelPostEntity> posts = loadPosts(channelId, periodFrom, periodTo);
+        int subscribers = resolveSubscribers(channelId);
+        sanitizeImplausibleViews(posts, subscribers);
 
         if (posts.size() < analysisProperties.getMinPostsForAnalysis()) {
             List<ChannelPostEntity> allPosts = channelPostRepository.findByChannelIdOrderByPublishedAtAsc(channelId);
             if (allPosts.size() > posts.size()) {
+                sanitizeImplausibleViews(allPosts, subscribers);
                 LocalDate widenedFrom = allPosts.get(0).getPublishedAt().atZone(MOSCOW).toLocalDate();
                 LocalDate widenedTo = allPosts.get(allPosts.size() - 1).getPublishedAt().atZone(MOSCOW).toLocalDate();
-                return analyzeFromPosts(channelId, allPosts, widenedFrom, widenedTo);
+                return analyzeFromPosts(channelId, allPosts, widenedFrom, widenedTo, subscribers);
             }
         }
-        return analyzeFromPosts(channelId, posts, periodFrom, periodTo);
+        return analyzeFromPosts(channelId, posts, periodFrom, periodTo, subscribers);
     }
 
     public AnalysisMetrics analyzeFromPosts(
@@ -61,13 +68,32 @@ public class AnalyticsService {
             LocalDate periodFrom,
             LocalDate periodTo
     ) {
+        return analyzeFromPosts(channelId, posts, periodFrom, periodTo, resolveSubscribers(channelId));
+    }
+
+    public AnalysisMetrics analyzeFromPosts(
+            Long channelId,
+            List<ChannelPostEntity> posts,
+            LocalDate periodFrom,
+            LocalDate periodTo,
+            int subscribers
+    ) {
         boolean limited = posts.size() < analysisProperties.getMinPostsFull();
 
         if (posts.isEmpty()) {
             return emptyMetrics(limited);
         }
 
-        int avgViews = (int) posts.stream().mapToInt(p -> safeViews(p)).average().orElse(0);
+        sanitizeImplausibleViews(posts, subscribers);
+
+        // Средние только по известным просмотрам > 0 (нули/мусор не считаем).
+        List<Integer> knownViews = posts.stream()
+                .map(this::safeViews)
+                .filter(v -> v > 0)
+                .toList();
+        int avgViews = knownViews.isEmpty()
+                ? 0
+                : (int) knownViews.stream().mapToInt(Integer::intValue).average().orElse(0);
         BigDecimal avgEr = posts.stream()
                 .map(p -> p.getEngagementRate() != null ? p.getEngagementRate() : BigDecimal.ZERO)
                 .reduce(BigDecimal.ZERO, BigDecimal::add)
@@ -135,7 +161,12 @@ public class AnalyticsService {
         if (prev.isEmpty() || currentAvg == 0) {
             return BigDecimal.ZERO;
         }
-        int prevAvg = (int) prev.stream().mapToInt(this::safeViews).average().orElse(0);
+        sanitizeImplausibleViews(prev, resolveSubscribers(channelId));
+        List<Integer> known = prev.stream().map(this::safeViews).filter(v -> v > 0).toList();
+        if (known.isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        int prevAvg = (int) known.stream().mapToInt(Integer::intValue).average().orElse(0);
         if (prevAvg == 0) {
             return BigDecimal.ZERO;
         }
@@ -179,8 +210,10 @@ public class AnalyticsService {
                 .map(e -> {
                     String[] parts = e.getKey().split("\\|");
                     BigDecimal avgEr = average(e.getValue());
-                    int avgViews = (int) slotViews.get(e.getKey()).stream()
-                            .mapToInt(Integer::intValue).average().orElse(0);
+                    List<Integer> views = slotViews.get(e.getKey()).stream().filter(v -> v > 0).toList();
+                    int avgViews = views.isEmpty()
+                            ? 0
+                            : (int) views.stream().mapToInt(Integer::intValue).average().orElse(0);
                     return new PublishSlotMetric(parts[0], parts[1], avgEr, avgViews);
                 })
                 .sorted(Comparator.comparingInt(PublishSlotMetric::avgViews).reversed())
@@ -210,11 +243,37 @@ public class AnalyticsService {
                         e.getKey(),
                         average(e.getValue()),
                         e.getValue().size(),
-                        (int) topicViews.get(e.getKey()).stream().mapToInt(Integer::intValue).average().orElse(0)
+                        averageKnownViews(topicViews.get(e.getKey()))
                 ))
                 .sorted(Comparator.comparingInt(TopicMetric::avgViews).reversed())
                 .limit(5)
                 .toList();
+    }
+
+    /**
+     * Обнуляет в БД заведомо невозможные просмотры по всему каналу.
+     * Вызывается после sync и перед любым analyze.
+     *
+     * @return сколько постов исправлено
+     */
+    public int sanitizeChannelPosts(Long channelId) {
+        if (channelId == null) {
+            return 0;
+        }
+        int subscribers = resolveSubscribers(channelId);
+        List<ChannelPostEntity> all = channelPostRepository.findByChannelIdOrderByPublishedAtAsc(channelId);
+        return sanitizeImplausibleViews(all, subscribers);
+    }
+
+    /** Просмотры для записи: свежий скрап приоритетнее, иначе сохраняем правдоподобные из БД. */
+    public static int resolveViews(int scrapedViews, int existingViews, int subscribers) {
+        if (scrapedViews > 0) {
+            return isPlausibleViews(scrapedViews, subscribers) ? scrapedViews : 0;
+        }
+        if (existingViews > 0 && isPlausibleViews(existingViews, subscribers)) {
+            return existingViews;
+        }
+        return 0;
     }
 
     private static String guessTopic(String text) {
@@ -269,6 +328,73 @@ public class AnalyticsService {
 
     private int safeViews(ChannelPostEntity post) {
         return post.getViews() != null ? post.getViews() : 0;
+    }
+
+    private int resolveSubscribers(Long channelId) {
+        if (channelId == null) {
+            return 0;
+        }
+        return channelRepository.findById(channelId)
+                .map(ChannelEntity::getSubscriberCount)
+                .filter(s -> s != null && s > 0)
+                .orElse(0);
+    }
+
+    /**
+     * Обнуляет в БД заведомо невозможные просмотры (старый estimateViews с полом 150 и т.п.).
+     */
+    private int sanitizeImplausibleViews(List<ChannelPostEntity> posts, int subscribers) {
+        if (posts == null || posts.isEmpty()) {
+            return 0;
+        }
+        List<ChannelPostEntity> dirty = new ArrayList<>();
+        for (ChannelPostEntity post : posts) {
+            int views = safeViews(post);
+            if (views > 0 && !isPlausibleViews(views, subscribers)) {
+                post.setViews(0);
+                post.setEngagementRate(BigDecimal.ZERO);
+                dirty.add(post);
+            }
+        }
+        if (!dirty.isEmpty()) {
+            channelPostRepository.saveAll(dirty);
+        }
+        return dirty.size();
+    }
+
+    private static int averageKnownViews(List<Integer> views) {
+        if (views == null || views.isEmpty()) {
+            return 0;
+        }
+        List<Integer> known = views.stream().filter(v -> v > 0).toList();
+        if (known.isEmpty()) {
+            return 0;
+        }
+        return (int) known.stream().mapToInt(Integer::intValue).average().orElse(0);
+    }
+
+    static boolean isPlausibleViews(int views, int subscribers) {
+        if (views <= 0) {
+            return false;
+        }
+        if (subscribers > 0 && subscribers <= 30 && isLegacyEstimateFloor(views)) {
+            return false;
+        }
+        if (subscribers <= 0) {
+            return views < 50_000;
+        }
+        if (subscribers <= 50) {
+            return views <= Math.max(subscribers * 3L, subscribers + 10L);
+        }
+        if (subscribers <= 500) {
+            return views <= subscribers * 5L;
+        }
+        return views <= subscribers * 3L;
+    }
+
+    /** Типичные «оценённые» полы из старого кода — не реальные просмотры микроканала. */
+    private static boolean isLegacyEstimateFloor(int views) {
+        return views == 100 || views == 150 || views == 200 || views == 250 || views == 300;
     }
 
     private static BigDecimal average(List<BigDecimal> values) {
