@@ -2,8 +2,13 @@ package org.example.pulse_ai.handler;
 
 import lombok.RequiredArgsConstructor;
 import org.example.pulse_ai.config.PulseOutreachProperties;
+import org.example.pulse_ai.config.PulseScoutProperties;
+import org.example.pulse_ai.domain.entitlement.AssistantQuotaService;
+import org.example.pulse_ai.domain.entitlement.EntitlementService;
+import org.example.pulse_ai.domain.entitlement.PerkType;
 import org.example.pulse_ai.domain.outreach.OutreachCampaignService;
 import org.example.pulse_ai.domain.scout.GroupMemberParseService;
+import org.example.pulse_ai.domain.scout.ScoutAccountService;
 import org.example.pulse_ai.domain.user.UserService;
 import org.example.pulse_ai.keyboard.KeyboardFactory;
 import org.example.pulse_ai.persistence.entity.ChannelEntity;
@@ -21,7 +26,7 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMa
 import java.util.List;
 import java.util.Optional;
 
-/** Jarvis P1 — исходящие рассылки в ЛС. */
+/** Pulse P1 — исходящие рассылки в ЛС. */
 @Component
 @RequiredArgsConstructor
 public class OutreachHandler {
@@ -29,22 +34,32 @@ public class OutreachHandler {
     private final OutreachCampaignService campaignService;
     private final GroupMemberParseService groupParseService;
     private final PulseOutreachProperties outreachProperties;
+    private final PulseScoutProperties scoutProperties;
+    private final ScoutAccountService scoutAccountService;
+    private final AssistantQuotaService assistantQuotaService;
+    private final EntitlementService entitlementService;
     private final UserService userService;
     private final UserSessionService sessionService;
     private final TelegramMessageSender messageSender;
     private final KeyboardFactory keyboards;
 
     public void showMenu(long chatId, int messageId, UserEntity user) {
+        if (!entitlementService.hasAccess(user.getId(), PerkType.MANAGER)) {
+            editOrSend(chatId, messageId, org.example.pulse_ai.text.SalesCopy.assistantPaywall(),
+                    keyboards.backToMainInline());
+            return;
+        }
         List<OutreachCampaignEntity> campaigns = campaignService.listCampaigns(user.getId());
-        int remaining = campaignService.sendsRemainingThisMonth(user.getId());
+        AssistantQuotaService.DmQuotaSnapshot dm = assistantQuotaService.dmQuota(user.getId());
+        AssistantQuotaService.ParseQuotaSnapshot parse = assistantQuotaService.parseQuota(user.getId());
 
         StringBuilder sb = new StringBuilder();
-        sb.append("📤 <b>Рассылки в ЛС</b>\n\n");
-        sb.append("Invite, custdev или оффер — Jarvis персонализирует текст и ставит в очередь.\n");
-        sb.append("Лимит: <b>").append(remaining).append("</b> / ")
-                .append(outreachProperties.getMonthlySendLimit()).append(" ЛС в месяц\n");
+        sb.append("📨 <b>Рассылки в ЛС</b>\n\n");
+        sb.append("Invite, custdev или оффер — Pulse персонализирует текст и ставит в очередь.\n\n");
+        sb.append(dm.counterLine()).append('\n');
+        sb.append("Парсинг: <b>").append(parse.remaining()).append("</b> ост.\n");
         if (!outreachProperties.isDispatchEnabled()) {
-            sb.append("\n<i>Для отправки: pulse.outreach.dispatch-enabled=true + sidecar.</i>\n");
+            sb.append("\n⚠️ <b>Отправка выключена</b> (dispatch-enabled=false) — очередь копится, ЛС не уходят.\n");
         }
         if (campaigns.isEmpty()) {
             sb.append("\nКампаний пока нет. Создайте первую.");
@@ -158,17 +173,28 @@ public class OutreachHandler {
             OutreachCampaignEntity c = campaignService.startCampaign(user.getId(), campaignId);
             String channelTitle = userService.findActiveChannel(user).map(ChannelEntity::getTitle).orElse("канал");
             campaignService.personalizePending(campaignId, channelTitle);
-            long pending = campaignService.prospects(campaignId).stream()
-                    .filter(p -> "PENDING".equals(p.getStatus())).count();
-            String note = outreachProperties.isDispatchEnabled()
-                    ? "🟢 Кампания #" + campaignId + " запущена. Scout-аккаунты начнут отправку."
-                    : "🟢 Кампания #" + campaignId + " в очереди (<b>" + pending
-                    + "</b> получателей). Подключите scout для реальной отправки.";
+            String note = buildStartNote(campaignId);
             messageSender.sendTextSafe(chatId, note);
             showCampaign(chatId, messageId, user, campaignId);
         } catch (IllegalStateException ex) {
             messageSender.sendTextSafe(chatId, "⚠️ " + ex.getMessage());
         }
+    }
+
+    private String buildStartNote(long campaignId) {
+        if (!outreachProperties.isDispatchEnabled()) {
+            return "⏸ Кампания #" + campaignId + " «идёт», но <b>dispatch выключен</b> — ЛС не уходят.\n"
+                    + "Включи: <code>pulse.outreach.dispatch-enabled: true</code>";
+        }
+        if (!scoutProperties.sidecarConfigured()) {
+            return "⏸ Кампания #" + campaignId + " в очереди, но <b>sidecar не настроен</b> "
+                    + "(pulse.scout.sidecar-url).";
+        }
+        if (scoutAccountService.pickOutreachAccount().isEmpty()) {
+            return "⏸ Кампания #" + campaignId + " в очереди, но <b>нет ACTIVE SENDER</b> в скаутах.\n"
+                    + "Добавь аккаунт типа SENDER/OUTREACH в /admin или /scout.";
+        }
+        return "🟢 Кампания #" + campaignId + " запущена. Scout шлёт ЛС из очереди (~раз в 1–2 мин).";
     }
 
     public void pauseCampaign(long chatId, int messageId, UserEntity user, long campaignId) {
@@ -207,10 +233,61 @@ public class OutreachHandler {
             messageSender.sendTextSafe(chatId, "У кампании нет ссылки на группу.");
             return;
         }
+        if (!assistantQuotaService.tryConsumeParse(user.getId())) {
+            messageSender.sendTextSafe(chatId,
+                    "🔒 Квота парсинга своих ссылок исчерпана в этом месяце.\n"
+                            + "Апгрейд тарифа или новый месяц — в «💳 Тарифы».");
+            return;
+        }
         groupParseService.queueParse(user.getId(), campaignId, opt.get().getSourceRef());
+        AssistantQuotaService.ParseQuotaSnapshot parse = assistantQuotaService.parseQuota(user.getId());
         messageSender.sendTextSafe(chatId,
-                "🔍 Парсинг группы поставлен в очередь. Участники добавятся в кампанию автоматически.");
+                "🔍 Парсинг группы в очереди. Осталось парсингов: <b>" + parse.remaining() + "</b>.");
         showCampaign(chatId, messageId, user, campaignId);
+    }
+
+    public void handleParse(long chatId, int messageId, String callbackData, UserEntity user) {
+        if (!entitlementService.hasAccess(user.getId(), PerkType.MANAGER)) {
+            editOrSend(chatId, messageId, org.example.pulse_ai.text.SalesCopy.assistantPaywall(),
+                    keyboards.backToMainInline());
+            return;
+        }
+        showParseHub(chatId, messageId, user);
+    }
+
+    public void showParseHub(long chatId, int messageId, UserEntity user) {
+        AssistantQuotaService.ParseQuotaSnapshot parse = assistantQuotaService.parseQuota(user.getId());
+        editOrSend(chatId, messageId,
+                "🔍 <b>Парсинг ЦА</b>\n\n"
+                        + "Скаут заходит в группу/канал по ссылке, снимает участников и отсеивает "
+                        + "мёртвые, накрученные и ботов — остаются живые с @username.\n\n"
+                        + "Квота: <b>" + parse.remaining() + "</b> ост.\n\n"
+                        + "Пришлите ссылку: <code>t.me/+...</code> / <code>t.me/joinchat/...</code> / публичный @chat",
+                keyboards.agentBackInline());
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setState(BotState.AUDIENCE_PARSE_INPUT);
+    }
+
+    public void handleParseLinkInput(long chatId, UserEntity user, String raw) {
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setState(BotState.MAIN_MENU);
+        String link = raw != null ? raw.trim() : "";
+        if (link.isBlank() || !(link.contains("t.me") || link.startsWith("@"))) {
+            messageSender.sendTextSafe(chatId, "Нужна ссылка на группу/канал (t.me/… или @username).");
+            return;
+        }
+        if (!assistantQuotaService.tryConsumeParse(user.getId())) {
+            messageSender.sendTextSafe(chatId,
+                    "🔒 Квота парсинга исчерпана. Апгрейд тарифа — в «💳 Тарифы» (парсинг уже внутри подписки).");
+            return;
+        }
+        groupParseService.queueParse(user.getId(), null, link);
+        AssistantQuotaService.ParseQuotaSnapshot parse = assistantQuotaService.parseQuota(user.getId());
+        messageSender.sendTextWithInlineSafe(chatId,
+                "🔍 Парсинг в очереди.\n"
+                        + "Скаут зайдёт, снимет участников и отсеет мёртвых.\n"
+                        + "Осталось парсингов: <b>" + parse.remaining() + "</b>.",
+                keyboards.agentBackInline());
     }
 
     public void handle(long chatId, int messageId, String callbackData, UserEntity user) {

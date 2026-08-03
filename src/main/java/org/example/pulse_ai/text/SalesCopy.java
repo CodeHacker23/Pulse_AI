@@ -1,9 +1,9 @@
 package org.example.pulse_ai.text;
 
+import org.example.pulse_ai.domain.entitlement.AssistantQuotaService;
 import org.example.pulse_ai.domain.entitlement.PerkType;
+import org.example.pulse_ai.domain.payment.PackageKind;
 import org.example.pulse_ai.persistence.entity.PackageEntity;
-
-import java.util.List;
 
 /**
  * Продающие тексты: якорение, дефицит, незавершённость, выгода vs боль.
@@ -13,35 +13,88 @@ public final class SalesCopy {
     private SalesCopy() {
     }
 
+    public static String catalogIntro(boolean subscribed, AssistantQuotaService.DmQuotaSnapshot dm) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("💳 <b>Тарифы Pulse AI</b>\n\n");
+        sb.append("<b>Разборы</b> — топливо на анализ и контент.\n");
+        sb.append("<b>Ассистент</b> — лиды в комментах + квота ЛС + парсинг.\n\n");
+        if (dm != null && subscribed) {
+            sb.append("Ваш счётчик: ").append(dm.counterLine()).append("\n");
+            sb.append("<i>~50 ₽/касание на рынке — ваша квота уже в тарифе.</i>\n\n");
+        } else if (!subscribed) {
+            sb.append("<i>Без подписки ассистента допы ЛС не продаём.</i>\n\n");
+        }
+        sb.append("Выберите пакет кнопкой ниже.");
+        return sb.toString();
+    }
+
     public static String packagesIntro() {
-        return """
-                💳 <b>Выберите свой темп роста</b>
-
-                Один запрос = полный разбор канала + идеи + черновики + публикация.
-
-                <i>Чем больше пакет — тем ниже цена запроса и больше бонусов на выбор.</i>
-
-                👇 Средний вариант чаще всего окупается с <b>первого сильного поста</b>.""";
+        return catalogIntro(false, null);
     }
 
     public static String packageLine(PackageEntity pack, boolean highlight) {
-        int perRequest = pack.getRequestCount() > 0
-                ? pack.getPriceRub() / pack.getRequestCount()
-                : pack.getPriceRub();
+        PackageKind kind = PackageKind.from(pack.getKind());
         String anchor = highlight ? "⭐ " : "• ";
-        String perks = pack.getPerkChoicesCount() > 0
-                ? " + <b>" + pack.getPerkChoicesCount() + "</b> бонус" + perkWord(pack.getPerkChoicesCount()) + " на выбор"
-                : "";
-        String priority = pack.isIncludesPriority() ? " + ⚡ приоритет" : "";
+        return switch (kind) {
+            case ASSISTANT -> assistantLine(pack, highlight);
+            case LS_TOPUP -> anchor + TgHtml.b(pack.getName())
+                    + " — <b>+" + pack.getDmQuota() + "</b> ЛС\n"
+                    + "   " + pack.getStarsAmount() + " ⭐ · " + pack.getPriceRub() + " ₽";
+            case ANALYSIS -> {
+                int perRequest = pack.getRequestCount() > 0
+                        ? pack.getPriceRub() / pack.getRequestCount()
+                        : pack.getPriceRub();
+                String perks = pack.getPerkChoicesCount() > 0
+                        ? " + <b>" + pack.getPerkChoicesCount() + "</b> бонус"
+                        + perkWord(pack.getPerkChoicesCount()) + " на выбор"
+                        : "";
+                String priority = pack.isIncludesPriority() ? " + ⚡ приоритет" : "";
+                yield anchor + TgHtml.b(pack.getName())
+                        + " — <b>" + pack.getRequestCount() + "</b> запросов"
+                        + perks + priority + "\n"
+                        + "   " + pack.getStarsAmount() + " ⭐ · ~" + perRequest + " ₽/запрос";
+            }
+        };
+    }
+
+    private static String assistantLine(PackageEntity pack, boolean highlight) {
+        String anchor = highlight ? "⭐ " : "• ";
+        String find = pack.isIncludesFindAudience() ? " · Найти ЦА" : "";
+        String prio = pack.isIncludesPriority() ? " · ⚡" : "";
         return anchor + TgHtml.b(pack.getName())
-                + " — <b>" + pack.getRequestCount() + "</b> запросов"
-                + perks + priority + "\n"
-                + "   " + pack.getStarsAmount() + " ⭐ · ~" + perRequest + " ₽/запрос";
+                + " — <b>" + pack.getDmQuota() + "</b> ЛС/мес"
+                + " · парсинг " + pack.getParseQuota() + find + prio + "\n"
+                + "   " + pack.getStarsAmount() + " ⭐ · " + pack.getPriceRub() + " ₽/мес";
     }
 
     public static String invoiceDescription(PackageEntity pack) {
-        return pack.getRequestCount() + " запросов + " + pack.getPerkChoicesCount()
-                + " бонус" + perkWord(pack.getPerkChoicesCount()) + " на выбор · Pulse AI";
+        PackageKind kind = PackageKind.from(pack.getKind());
+        return switch (kind) {
+            case ASSISTANT -> pack.getName() + ": " + pack.getDmQuota() + " ЛС/мес · Pulse Ассистент";
+            case LS_TOPUP -> "Доп. +" + pack.getDmQuota() + " ЛС · Pulse AI";
+            case ANALYSIS -> pack.getRequestCount() + " запросов + " + pack.getPerkChoicesCount()
+                    + " бонус" + perkWord(pack.getPerkChoicesCount()) + " на выбор · Pulse AI";
+        };
+    }
+
+    public static String assistantPaymentSuccess(String packName, AssistantQuotaService.DmQuotaSnapshot dm) {
+        return """
+                ✅ <b>Подписка «%s» активна на 30 дней.</b>
+
+                %s
+
+                Откройте 🧑‍💼 Ассистент: включите ловлю лидов и запускайте рассылки.
+                <i>Рынок ~50 ₽/касание — ваша квота уже внутри тарифа.</i>"""
+                .formatted(TgHtml.esc(packName), dm.counterLine());
+    }
+
+    public static String lsTopupSuccess(String packName, int added, AssistantQuotaService.DmQuotaSnapshot dm) {
+        return """
+                ✅ <b>%s</b> зачислены.
+
+                +<b>%d</b> ЛС к допам.
+                %s"""
+                .formatted(TgHtml.esc(packName), added, dm.counterLine());
     }
 
     public static String paymentSuccessChoosePerks(String packName, int credited, int balance, int perksToPick) {
@@ -118,6 +171,17 @@ public final class SalesCopy {
                 В пакете — до <b>30 запросов</b> и бонусы: разбор постов, жёсткий аудит, дайджест, конкуренты…
 
                 <i>Один сильный пост часто окупает «Старт» с первого раза.</i>""";
+    }
+
+    public static String assistantPaywall() {
+        return """
+                🔒 <b>Нужна подписка Pulse Ассистент</b>
+
+                • <b>3990</b> — комменты + 100 ЛС
+                • <b>6990</b> — 500 ЛС + Найти ЦА
+                • <b>9990</b> — 1000 ЛС + приоритет
+
+                Оформить — «💳 Тарифы».""";
     }
 
     public static String postAuditIntro() {

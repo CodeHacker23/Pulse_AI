@@ -74,6 +74,55 @@ public class CallbackRouter {
             menuHandler.showWhatInRequest(chatId);
             return;
         }
+        if (callbackData.equals(CallbackData.MENU_CONTENT)) {
+            menuHandler.showContentHub(chatId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_ANALYTICS)) {
+            menuHandler.showAnalyticsHub(chatId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_SETTINGS)) {
+            menuHandler.showSettings(chatId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_HELP)) {
+            menuHandler.showHelp(chatId);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_MORE)) {
+            menuHandler.showMore(chatId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_TIMEZONE)) {
+            menuHandler.showTimezonePicker(chatId, user);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.MENU_TIMEZONE_SET)) {
+            String zoneId = callbackData.substring(CallbackData.MENU_TIMEZONE_SET.length());
+            menuHandler.setTimezone(chatId, user, zoneId);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_ANALYTICS_PLUS)) {
+            menuHandler.showAnalyticsPlus(chatId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_GROWTH)) {
+            menuHandler.showGrowth(chatId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_STYLE_PROMPT)) {
+            menuHandler.showStylePrompt(chatId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_STYLE_PROMPT_SET)) {
+            menuHandler.promptStyleInput(chatId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.MENU_STYLE_PROMPT_CLEAR)) {
+            menuHandler.clearStylePrompt(chatId, user);
+            return;
+        }
         if (callbackData.equals(CallbackData.CHANNEL_CONNECT)
                 || callbackData.equals(CallbackData.CHANNEL_CONNECT_LIMITED)) {
             channelHandler.showConnectInstructions(chatId);
@@ -96,7 +145,7 @@ public class CallbackRouter {
             return;
         }
         if (callbackData.equals(CallbackData.PAY_SELECT)) {
-            paymentHandler.showPackages(chatId);
+            paymentHandler.showPackages(chatId, user);
             return;
         }
         if (callbackData.startsWith(CallbackData.PREFIX_PAY)) {

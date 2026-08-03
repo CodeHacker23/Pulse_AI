@@ -179,6 +179,62 @@ public class TelegramMessageSender {
         execute(edit);
     }
 
+    /**
+     * Редактирует текст сообщения. Если это фото/медиа без текста
+     * ({@code there is no text in the message to edit}) — удаляет старое и шлёт новое.
+     *
+     * @return messageId актуального UI-сообщения (может смениться после replace)
+     */
+    public int editTextOrReplace(long chatId, int messageId, String text, InlineKeyboardMarkup keyboard) {
+        if (bot == null) {
+            return messageId;
+        }
+        if (messageId <= 0) {
+            sendTextWithInlineSafe(chatId, text, keyboard);
+            return 0;
+        }
+        try {
+            bot.execute(EditMessageText.builder()
+                    .chatId(chatId)
+                    .messageId(messageId)
+                    .text(text)
+                    .parseMode("HTML")
+                    .replyMarkup(keyboard)
+                    .build());
+            return messageId;
+        } catch (TelegramApiException e) {
+            String err = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+            if (err.contains("message is not modified")) {
+                return messageId;
+            }
+            if (err.contains("no text in the message")
+                    || err.contains("message to edit not found")
+                    || err.contains("message can't be edited")) {
+                deleteMessageSafe(chatId, messageId);
+                Integer newId = sendReturningMessageIdWithInline(chatId, text, keyboard);
+                return newId != null ? newId : 0;
+            }
+            throw new IllegalStateException("Не удалось обновить сообщение в Telegram", e);
+        }
+    }
+
+    public Integer sendReturningMessageIdWithInline(long chatId, String text, InlineKeyboardMarkup keyboard) {
+        if (bot == null) {
+            return null;
+        }
+        try {
+            return bot.execute(SendMessage.builder()
+                    .chatId(chatId)
+                    .text(text)
+                    .parseMode("HTML")
+                    .replyMarkup(keyboard)
+                    .build()).getMessageId();
+        } catch (TelegramApiException e) {
+            log.warn("Не удалось отправить сообщение в {}: {}", chatId, e.getMessage());
+            return null;
+        }
+    }
+
     /** Sends a message and returns its Telegram messageId, or {@code null} if it could not be sent. */
     public Integer sendReturningMessageId(long chatId, String text) {
         if (bot == null) {

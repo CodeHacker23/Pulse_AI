@@ -92,11 +92,16 @@ public class ExternalMetricsService {
      */
     public ExternalChannelMetrics bestMetrics(String username) {
         if (username == null || username.isBlank()) {
-            return null;
+            return ExternalChannelMetrics.unavailable("none", "нет username");
         }
         ExternalChannelMetrics best = null;
         for (ExternalChannelMetrics m : collect(username)) {
             if (!m.available() || !hasAnyValue(m)) {
+                continue;
+            }
+            // Telega часто врёт по микроканалам — не берём как единственный источник подписчиков.
+            if ("Telega.in".equals(m.source()) && m.subscribers() != null && m.subscribers() > 1000
+                    && (m.avgReach() == null || m.err() == null)) {
                 continue;
             }
             if ("TGStat".equals(m.source())) {
@@ -106,7 +111,7 @@ public class ExternalMetricsService {
                 best = m;
             }
         }
-        return best;
+        return best != null ? best : ExternalChannelMetrics.unavailable("none", "нет данных");
     }
 
     /**

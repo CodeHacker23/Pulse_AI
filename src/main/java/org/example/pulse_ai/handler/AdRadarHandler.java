@@ -1,16 +1,22 @@
 package org.example.pulse_ai.handler;
 
 import lombok.RequiredArgsConstructor;
+import org.example.pulse_ai.domain.radar.AdDealService;
+import org.example.pulse_ai.domain.radar.AdPlacementMatchService;
+import org.example.pulse_ai.domain.radar.AdPlacementMatchService.MatchResult;
+import org.example.pulse_ai.domain.radar.AdPlacementMatchService.ScoredPlacement;
 import org.example.pulse_ai.domain.radar.AdPlacementQualityService;
 import org.example.pulse_ai.domain.radar.AdRadarService;
 import org.example.pulse_ai.domain.user.UserService;
 import org.example.pulse_ai.keyboard.KeyboardFactory;
+import org.example.pulse_ai.persistence.entity.AdDealEntity;
 import org.example.pulse_ai.persistence.entity.AdPlacementEntity;
-import org.example.pulse_ai.persistence.entity.AdWatchSourceEntity;
 import org.example.pulse_ai.persistence.entity.AdRadarHitEntity;
-import org.example.pulse_ai.persistence.repository.AdRadarHitRepository;
+import org.example.pulse_ai.persistence.entity.AdWatchSourceEntity;
 import org.example.pulse_ai.persistence.entity.ChannelEntity;
 import org.example.pulse_ai.persistence.entity.UserEntity;
+import org.example.pulse_ai.persistence.repository.AdPlacementRepository;
+import org.example.pulse_ai.persistence.repository.AdRadarHitRepository;
 import org.example.pulse_ai.session.BotState;
 import org.example.pulse_ai.session.UserSession;
 import org.example.pulse_ai.session.UserSessionService;
@@ -22,12 +28,19 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMa
 import java.util.List;
 import java.util.Optional;
 
-/** Jarvis P1.5 — Ad Radar: мониторинг чатов и скоринг площадок. */
+/**
+ * Площадки для рекламы: один экран → «Начать поиск» → список кандидатов.
+ * Проверка @канала вручную — в «⋯ Ещё». Сигналы/чаты — скрыты из основного UI.
+ */
 @Component
 @RequiredArgsConstructor
 public class AdRadarHandler {
 
     private final AdRadarService adRadarService;
+    private final AdPlacementMatchService matchService;
+    private final AdDealService dealService;
+    private final AdDealHandler adDealHandler;
+    private final AdPlacementRepository placementRepository;
     private final AdRadarHitRepository hitRepository;
     private final UserService userService;
     private final UserSessionService sessionService;
@@ -36,89 +49,152 @@ public class AdRadarHandler {
 
     public void showMenu(long chatId, int messageId, UserEntity user) {
         Optional<ChannelEntity> channelOpt = userService.findActiveChannel(user);
-        long watchCount = adRadarService.activeWatches(user.getId()).size();
-        long placeCount = adRadarService.recentPlacements(user.getId()).size();
+        StringBuilder sb = new StringBuilder();
+        sb.append("📡 <b>Площадки для рекламы</b>\n\n");
+        sb.append("Найду каналы, где имеет смысл купить рекламу вашего канала/оффера.\n\n");
+        sb.append("• Подберу под нишу и покажу ориентир цены\n");
+        sb.append("• Оформим сделку: формат → креатив → бриф админу\n");
+        sb.append("• Вам цена = админ + 20%\n\n");
+        sb.append("<i>Оплата через Pulse — следующий этап. Сейчас фиксируем договорённость.</i>\n\n");
+        if (channelOpt.isPresent()) {
+            ChannelEntity c = channelOpt.get();
+            sb.append("Фокус: «").append(TgHtml.esc(c.getTitle())).append("»");
+            if (c.getCategory() != null && !c.getCategory().isBlank()) {
+                sb.append(" · ").append(TgHtml.esc(c.getCategory()));
+            }
+        } else {
+            sb.append("⚠️ Сначала разберите канал (ссылка → анализ) — иначе не из чего брать нишу.");
+        }
+        editOrSend(chatId, messageId, sb.toString().trim(), keyboards.adRadarMenuInline());
+    }
+
+    public void showMatch(long chatId, int messageId, UserEntity user) {
+        Optional<ChannelEntity> channelOpt = userService.findActiveChannel(user);
+        if (channelOpt.isEmpty()) {
+            editOrSend(chatId, messageId,
+                    "📡 <b>Площадки для рекламы</b>\n\n"
+                            + "Сначала пришлите ссылку на канал и дождитесь разбора — нужна ниша.",
+                    keyboards.adRadarMenuInline());
+            return;
+        }
+        editOrSend(chatId, messageId,
+                "📡 <b>Площадки для рекламы</b>\n\n⏳ Ищу каналы под вашу нишу…",
+                null);
+
+        MatchResult result = matchService.matchForChannel(user, channelOpt.get());
+        if (result.isEmpty()) {
+            String detail = result.emptyMessage() != null ? result.emptyMessage()
+                    : "Кандидатов не нашлось. Попробуйте позже или проверьте @канал в «⋯ Ещё».";
+            editOrSend(chatId, messageId,
+                    "📡 <b>Площадки для рекламы</b>\n\n" + detail,
+                    keyboards.adRadarMenuInline());
+            return;
+        }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("📡 <b>Ad Radar — поиск рекламы</b>\n\n");
-        sb.append("Jarvis помогает находить <b>где покупать рекламу</b> и не слить бюджет на мёртвые каналы.\n\n");
-        sb.append("• <b>Чаты на мониторинг</b> — сохраняете группу; позже observer ловит «реклама», «прайс» (P2).\n");
-        sb.append("• <b>Проверка площадки</b> — живой / мёртвый / спам по постам канала.\n\n");
-        if (channelOpt.isPresent()) {
-            sb.append("Ваш канал: «").append(TgHtml.esc(channelOpt.get().getTitle())).append("»\n");
-        } else {
-            sb.append("⚠️ Подключите свой канал — так Jarvis точнее подберёт площадки.\n");
-        }
-        sb.append("Сохранено: <b>").append(watchCount).append("</b> чатов · <b>")
-                .append(placeCount).append("</b> проверок");
-
-        editOrSend(chatId, messageId, sb.toString(), keyboards.adRadarMenuInline());
-    }
-
-    public void showWatches(long chatId, int messageId, UserEntity user) {
-        List<AdWatchSourceEntity> watches = adRadarService.activeWatches(user.getId());
-        if (watches.isEmpty()) {
-            editOrSend(chatId, messageId,
-                    "📋 <b>Чаты на мониторинг</b>\n\nПока пусто.\n"
-                            + "Добавьте ссылку на чат/группу — Jarvis сохранит её для observer-сети.",
-                    keyboards.adRadarMenuInline());
-            return;
-        }
-        StringBuilder sb = new StringBuilder("📋 <b>Чаты на мониторинг</b>\n\n");
-        int n = 1;
-        for (AdWatchSourceEntity w : watches) {
-            sb.append(n++).append(". ").append(TgHtml.esc(w.getLinkOrUsername()));
-            if (w.getTitle() != null && !w.getTitle().equals(w.getLinkOrUsername())) {
-                sb.append(" · ").append(TgHtml.esc(w.getTitle()));
+        sb.append("📡 <b>Площадки под «").append(TgHtml.esc(result.category())).append("»</b>\n\n");
+        int i = 1;
+        for (ScoredPlacement sp : result.placements()) {
+            AdPlacementEntity p = sp.placement();
+            int price = sp.estimatedPriceRub();
+            int client = AdDealService.clientPrice(price);
+            sb.append(i++).append(". <b>@").append(TgHtml.esc(p.getTargetUsername())).append("</b>");
+            if (p.getTargetTitle() != null) {
+                sb.append(" — ").append(TgHtml.esc(shorten(p.getTargetTitle(), 40)));
             }
-            sb.append("\n");
-        }
-        sb.append("\n<i>Авто-мониторинг ключевых слов подключим в P2 (observer).</i>");
-        editOrSend(chatId, messageId, sb.toString(), keyboards.adRadarMenuInline());
-    }
-
-    public void showPlacements(long chatId, int messageId, UserEntity user) {
-        List<AdPlacementEntity> places = adRadarService.recentPlacements(user.getId());
-        if (places.isEmpty()) {
-            editOrSend(chatId, messageId,
-                    "🔍 <b>Проверенные площадки</b>\n\nПока пусто.\n"
-                            + "Пришлите @канал — Jarvis проверит: живой, мёртвый или спам.",
-                    keyboards.adRadarMenuInline());
-            return;
-        }
-        StringBuilder sb = new StringBuilder("🔍 <b>Проверенные площадки</b>\n\n");
-        for (AdPlacementEntity p : places) {
-            sb.append(AdPlacementQualityService.verdictLabel(p.getQualityVerdict()))
-                    .append(" <b>@").append(TgHtml.esc(p.getTargetUsername())).append("</b>");
-            if (p.getQualityScore() != null) {
-                sb.append(" · ").append(p.getQualityScore()).append("/100");
+            sb.append('\n');
+            if (sp.subscribersHint() > 0) {
+                sb.append("   👥 ~").append(formatNum(sp.subscribersHint()));
             }
-            sb.append("\n");
-            if (p.getQualityNotes() != null) {
-                sb.append("<i>").append(TgHtml.esc(p.getQualityNotes())).append("</i>\n");
+            if (p.getAvgViews() != null && p.getAvgViews() > 0) {
+                sb.append(" · 👁 ~").append(formatNum(p.getAvgViews()));
             }
-            sb.append("\n");
+            sb.append(" · 💰 ~").append(formatNum(client)).append(" ₽")
+                    .append(" <i>(вы, +20%)</i>");
+            sb.append("\n   📌 закреп: 1ч / 24ч / без — уточним\n\n");
         }
+        sb.append("Нажмите канал → креатив или интерес к размещению.");
         editOrSend(chatId, messageId, sb.toString().trim(),
-                keyboards.adRadarPlacementsInline(places));
+                keyboards.adRadarMatchInline(result.placements().stream().map(ScoredPlacement::placement).toList()));
     }
 
-    public void promptAddWatch(long chatId, UserEntity user) {
-        sessionService.getOrCreate(chatId).setState(BotState.AD_RADAR_WATCH_INPUT);
-        messageSender.sendTextWithInlineSafe(chatId,
-                "➕ <b>Добавить чат на мониторинг</b>\n\n"
-                        + "Пришлите ссылку или @username чата/группы, где бывает реклама.\n"
-                        + "Пример: <code>t.me/marketing_chat</code> или <code>@channel</code>",
-                keyboards.agentBackInline());
+    public void showPlacementCard(long chatId, int messageId, UserEntity user, long placementId) {
+        AdPlacementEntity p = placementRepository.findByIdAndUserId(placementId, user.getId()).orElse(null);
+        if (p == null) {
+            messageSender.sendTextSafe(chatId, "Площадка не найдена.");
+            return;
+        }
+        int priceEst = AdRadarService.estimatePostPrice(null, p.getAvgViews());
+        // вытащить из notes если есть "~N ₽"
+        Integer fromNotes = parsePriceFromNotes(p.getQualityNotes());
+        if (fromNotes != null) {
+            priceEst = fromNotes;
+        }
+        int client = AdDealService.clientPrice(priceEst);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append(AdPlacementQualityService.verdictLabel(p.getQualityVerdict()))
+                .append(" <b>@").append(TgHtml.esc(p.getTargetUsername())).append("</b>\n");
+        if (p.getTargetTitle() != null) {
+            sb.append(TgHtml.esc(p.getTargetTitle())).append('\n');
+        }
+        sb.append("\n");
+        if (p.getAvgViews() != null) {
+            sb.append("Охват ~").append(formatNum(p.getAvgViews())).append(" просм.\n");
+        }
+        sb.append("Ориентир поста: ~").append(formatNum(priceEst)).append(" ₽ админу\n");
+        sb.append("Вам через Pulse: ~<b>").append(formatNum(client)).append(" ₽</b> (+20%)\n");
+        sb.append("Закреп: <b>1 час / 24 часа / без</b> — согласуем с админом\n");
+        if (p.getQualityNotes() != null) {
+            sb.append("\n<i>").append(TgHtml.esc(shorten(p.getQualityNotes(), 200))).append("</i>\n");
+        }
+        sb.append("\n<i>Дальше: оформить сделку (формат, креатив, бриф админу).</i>");
+        editOrSend(chatId, messageId, sb.toString().trim(), keyboards.adRadarPlacementCardInline(p.getId()));
     }
 
+    public void generateCreative(long chatId, int messageId, UserEntity user, long placementId) {
+        Optional<ChannelEntity> ownerOpt = userService.findActiveChannel(user);
+        AdPlacementEntity p = placementRepository.findByIdAndUserId(placementId, user.getId()).orElse(null);
+        if (ownerOpt.isEmpty() || p == null) {
+            messageSender.sendTextSafe(chatId, "Нужен ваш канал и площадка.");
+            return;
+        }
+        editOrSend(chatId, messageId, "⏳ Пишу рекламный пост под @" + TgHtml.esc(p.getTargetUsername()) + "…", null);
+        AdDealEntity deal = dealService.openOrGet(user, ownerOpt.get(), p);
+        String draft = dealService.generateCreative(ownerOpt.get(), p);
+        deal = dealService.attachCreative(deal, draft);
+        String text = "✍️ <b>Черновик для @" + TgHtml.esc(p.getTargetUsername()) + "</b>\n"
+                + "Сделка #" + deal.getId() + "\n\n"
+                + TgHtml.fromMarkdown(draft)
+                + "\n\nОформите сделку, чтобы выбрать формат и отправить бриф админу.";
+        editOrSend(chatId, messageId, text, keyboards.adDealCardInline(deal));
+    }
+
+    public void bookInterest(long chatId, int messageId, UserEntity user, long placementId) {
+        adDealHandler.openDeal(chatId, messageId, user, placementId);
+    }
+
+    /** Ручная проверка — вход из «⋯ Ещё». */
     public void promptAddPlace(long chatId, UserEntity user) {
         sessionService.getOrCreate(chatId).setState(BotState.AD_RADAR_PLACE_INPUT);
         messageSender.sendTextWithInlineSafe(chatId,
-                "🔎 <b>Проверить площадку</b>\n\n"
-                        + "Пришлите @username <b>публичного канала</b>, где хотите купить рекламу.\n"
-                        + "Jarvis проверит активность и долю рекламных постов.",
-                keyboards.agentBackInline());
+                "🔎 <b>Проверить площадку</b>\n\nПришлите @username публичного канала.",
+                keyboards.adRadarMenuInline());
+    }
+
+    public void handlePlaceInput(long chatId, UserEntity user, String raw) {
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setState(BotState.MAIN_MENU);
+        messageSender.sendTextSafe(chatId, "⏳ Проверяю…");
+        Long ownerChannelId = userService.findActiveChannel(user).map(ChannelEntity::getId).orElse(null);
+        try {
+            AdPlacementEntity saved = adRadarService.checkAndSavePlacement(user, ownerChannelId, raw);
+            showPlacementCard(chatId, 0, user, saved.getId());
+        } catch (IllegalStateException ex) {
+            messageSender.sendTextSafe(chatId, "⚠️ " + ex.getMessage());
+        } catch (Exception ex) {
+            messageSender.sendTextSafe(chatId, "Не удалось проверить. Нужен публичный @username.");
+        }
     }
 
     public void handleWatchInput(long chatId, UserEntity user, String raw) {
@@ -128,45 +204,64 @@ public class AdRadarHandler {
         try {
             AdWatchSourceEntity saved = adRadarService.addWatchSource(user, ownerChannelId, raw);
             messageSender.sendTextWithInlineSafe(chatId,
-                    "✅ Чат добавлен: <b>" + TgHtml.esc(saved.getLinkOrUsername()) + "</b>\n\n"
-                            + "Когда observer-сеть заработает — пришлём сигнал «реклама/прайс».",
+                    "✅ Источник сигналов: <b>" + TgHtml.esc(saved.getLinkOrUsername()) + "</b>",
                     keyboards.adRadarMenuInline());
-        } catch (IllegalStateException ex) {
-            messageSender.sendTextSafe(chatId, "⚠️ " + ex.getMessage());
         } catch (Exception ex) {
-            messageSender.sendTextSafe(chatId, "Не удалось добавить. Проверьте ссылку.");
+            messageSender.sendTextSafe(chatId, "Не удалось добавить.");
         }
     }
 
-    public void handlePlaceInput(long chatId, UserEntity user, String raw) {
-        UserSession session = sessionService.getOrCreate(chatId);
-        session.setState(BotState.MAIN_MENU);
-        messageSender.sendTextSafe(chatId, "⏳ Проверяю канал…");
-        Long ownerChannelId = userService.findActiveChannel(user).map(ChannelEntity::getId).orElse(null);
-        try {
-            AdPlacementEntity saved = adRadarService.checkAndSavePlacement(user, ownerChannelId, raw);
-            String text = AdPlacementQualityService.verdictLabel(saved.getQualityVerdict())
-                    + " <b>@" + TgHtml.esc(saved.getTargetUsername()) + "</b>\n"
-                    + "Оценка: <b>" + saved.getQualityScore() + "/100</b>\n\n"
-                    + TgHtml.esc(saved.getQualityNotes() != null ? saved.getQualityNotes() : "");
-            messageSender.sendTextWithInlineSafe(chatId, text, keyboards.adRadarMenuInline());
-        } catch (IllegalStateException ex) {
-            messageSender.sendTextSafe(chatId, "⚠️ " + ex.getMessage());
-        } catch (Exception ex) {
-            messageSender.sendTextSafe(chatId, "Не удалось проверить канал. Нужен публичный @username.");
+    public void promptAddWatch(long chatId, UserEntity user) {
+        sessionService.getOrCreate(chatId).setState(BotState.AD_RADAR_WATCH_INPUT);
+        messageSender.sendTextWithInlineSafe(chatId,
+                "Пришлите ссылку на чат, где кидают прайсы (разведка).",
+                keyboards.adRadarMenuInline());
+    }
+
+    public void showWatches(long chatId, int messageId, UserEntity user) {
+        List<AdWatchSourceEntity> watches = adRadarService.activeWatches(user.getId());
+        String text = watches.isEmpty()
+                ? "Чатов-источников пока нет."
+                : "Источников: " + watches.size();
+        editOrSend(chatId, messageId, text, keyboards.adRadarMenuInline());
+    }
+
+    public void showPlacements(long chatId, int messageId, UserEntity user) {
+        List<AdPlacementEntity> places = adRadarService.recentPlacements(user.getId());
+        if (places.isEmpty()) {
+            editOrSend(chatId, messageId, "Пока пусто — нажмите «Начать поиск».", keyboards.adRadarMenuInline());
+            return;
         }
+        showMatchFromList(chatId, messageId, places);
+    }
+
+    private void showMatchFromList(long chatId, int messageId, List<AdPlacementEntity> places) {
+        StringBuilder sb = new StringBuilder("📡 <b>Недавние площадки</b>\n\n");
+        for (AdPlacementEntity p : places) {
+            sb.append("• <b>@").append(TgHtml.esc(p.getTargetUsername())).append("</b>\n");
+        }
+        editOrSend(chatId, messageId, sb.toString().trim(), keyboards.adRadarMatchInline(places));
+    }
+
+    public void showHits(long chatId, int messageId, UserEntity user) {
+        List<AdRadarHitEntity> hits = hitRepository.findTop10ByUserIdAndStatusOrderByCreatedAtDesc(user.getId(), "NEW");
+        editOrSend(chatId, messageId,
+                hits.isEmpty() ? "Сигналов пока нет." : "Сигналов: " + hits.size(),
+                keyboards.adRadarMenuInline());
     }
 
     public void recheck(long chatId, int messageId, UserEntity user, long placementId) {
-        messageSender.editTextSafe(chatId, messageId, "⏳ Обновляю проверку…");
+        messageSender.editTextSafe(chatId, messageId, "⏳ Обновляю…");
         adRadarService.recheckPlacement(user.getId(), placementId).ifPresentOrElse(
-                saved -> showPlacements(chatId, messageId, user),
+                saved -> showPlacementCard(chatId, messageId, user, saved.getId()),
                 () -> messageSender.sendTextSafe(chatId, "Площадка не найдена."));
     }
 
     public void handle(long chatId, int messageId, String callbackData, UserEntity user) {
         if (callbackData.equals(CallbackData.AGENT_RADAR)) {
             showMenu(chatId, messageId, user);
+        } else if (callbackData.equals(CallbackData.AGENT_RADAR_MATCH)) {
+            showMatch(chatId, messageId, user);
         } else if (callbackData.equals(CallbackData.AGENT_RADAR_WATCHES)) {
             showWatches(chatId, messageId, user);
         } else if (callbackData.equals(CallbackData.AGENT_RADAR_PLACES)) {
@@ -177,6 +272,15 @@ public class AdRadarHandler {
             promptAddPlace(chatId, user);
         } else if (callbackData.equals(CallbackData.AGENT_RADAR_HITS)) {
             showHits(chatId, messageId, user);
+        } else if (callbackData.startsWith(CallbackData.AGENT_RADAR_VIEW)) {
+            long id = Long.parseLong(callbackData.substring(CallbackData.AGENT_RADAR_VIEW.length()));
+            showPlacementCard(chatId, messageId, user, id);
+        } else if (callbackData.startsWith(CallbackData.AGENT_RADAR_CREATIVE)) {
+            long id = Long.parseLong(callbackData.substring(CallbackData.AGENT_RADAR_CREATIVE.length()));
+            generateCreative(chatId, messageId, user, id);
+        } else if (callbackData.startsWith(CallbackData.AGENT_RADAR_BOOK)) {
+            long id = Long.parseLong(callbackData.substring(CallbackData.AGENT_RADAR_BOOK.length()));
+            bookInterest(chatId, messageId, user, id);
         } else if (callbackData.startsWith(CallbackData.AGENT_RADAR_RECHECK)) {
             long id = Long.parseLong(callbackData.substring(CallbackData.AGENT_RADAR_RECHECK.length()));
             recheck(chatId, messageId, user, id);
@@ -185,25 +289,33 @@ public class AdRadarHandler {
         }
     }
 
-    public void showHits(long chatId, int messageId, UserEntity user) {
-        List<AdRadarHitEntity> hits = hitRepository.findTop10ByUserIdAndStatusOrderByCreatedAtDesc(user.getId(), "NEW");
-        if (hits.isEmpty()) {
-            editOrSend(chatId, messageId,
-                    "📣 <b>Сигналы Ad Radar</b>\n\nПока пусто.\n"
-                            + "Добавьте чаты на мониторинг — observer пришлёт сигнал, когда найдёт «реклама/прайс».",
-                    keyboards.adRadarMenuInline());
-            return;
+    private static Integer parsePriceFromNotes(String notes) {
+        if (notes == null) {
+            return null;
         }
-        StringBuilder sb = new StringBuilder("📣 <b>Сигналы Ad Radar</b>\n\n");
-        for (AdRadarHitEntity h : hits) {
-            sb.append("• ").append(TgHtml.esc(h.getSnippet() != null ? h.getSnippet() : "сигнал")).append("\n\n");
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("~(\\d+)\\s*₽").matcher(notes);
+        if (m.find()) {
+            try {
+                return Integer.parseInt(m.group(1));
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
         }
-        editOrSend(chatId, messageId, sb.toString().trim(), keyboards.adRadarMenuInline());
+        return null;
+    }
+
+    private static String formatNum(int n) {
+        return String.format("%,d", n).replace(',', ' ');
+    }
+
+    private static String shorten(String s, int max) {
+        String t = s.replace('\n', ' ').trim();
+        return t.length() <= max ? t : t.substring(0, max - 1) + "…";
     }
 
     private void editOrSend(long chatId, int messageId, String text, InlineKeyboardMarkup keyboard) {
         if (messageId > 0) {
-            messageSender.editText(chatId, messageId, text, keyboard);
+            messageSender.editTextOrReplace(chatId, messageId, text, keyboard);
         } else {
             messageSender.sendTextWithInlineSafe(chatId, text, keyboard);
         }

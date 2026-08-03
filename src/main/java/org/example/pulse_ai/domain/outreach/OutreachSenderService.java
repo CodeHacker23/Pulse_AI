@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.pulse_ai.config.PulseOutreachProperties;
 import org.example.pulse_ai.config.PulseScoutProperties;
 import org.example.pulse_ai.domain.scout.ScoutAccountService;
+import org.example.pulse_ai.domain.scout.ScoutActionLogService;
 import org.example.pulse_ai.domain.scout.ScoutSessionGateway;
 import org.example.pulse_ai.persistence.entity.OutreachProspectEntity;
 import org.example.pulse_ai.persistence.entity.ScoutAccountEntity;
@@ -25,6 +26,7 @@ public class OutreachSenderService {
     private final ScoutSessionGateway scoutGateway;
     private final OutreachCampaignService campaignService;
     private final OutreachProspectRepository prospectRepository;
+    private final ScoutActionLogService actionLogService;
 
     @Transactional
     public SendOutcome trySend(OutreachProspectEntity prospect, Long ownerUserId) {
@@ -36,16 +38,16 @@ public class OutreachSenderService {
         }
         Optional<ScoutAccountEntity> accountOpt = scoutAccountService.pickOutreachAccount();
         if (accountOpt.isEmpty()) {
-            return SendOutcome.failed("нет доступных scout-аккаунтов");
+            return SendOutcome.skipped("no ACTIVE SENDER/OUTREACH account");
         }
         ScoutAccountEntity account = accountOpt.get();
         String text = prospect.getPersonalizedText();
         if (text == null || text.isBlank()) {
-            return SendOutcome.failed("пустой текст");
+            return SendOutcome.failed("empty message text");
         }
         String username = prospect.getUsername();
         if (username == null || username.isBlank()) {
-            return SendOutcome.failed("нет username");
+            return SendOutcome.failed("empty username");
         }
 
         ScoutSessionGateway.SendResult result = scoutGateway.sendDirectMessage(
@@ -56,9 +58,13 @@ public class OutreachSenderService {
             prospect.setScoutAccountId(account.getId());
             prospectRepository.save(prospect);
             campaignService.markSent(prospect.getId(), ownerUserId);
+            actionLogService.ok(account.getId(), ownerUserId, "DM_SEND",
+                    "@" + username + " via " + account.getLabel());
             return SendOutcome.sent(account.getLabel());
         }
         campaignService.markFailed(prospect.getId(), result.error());
+        actionLogService.fail(account.getId(), ownerUserId, "DM_SEND",
+                "@" + username, result.error());
         return SendOutcome.failed(result.error());
     }
 

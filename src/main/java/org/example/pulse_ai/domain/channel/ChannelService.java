@@ -171,7 +171,8 @@ public class ChannelService {
         }
         ChannelEntity saved = channelRepository.save(channel);
 
-        channelSyncService.syncForAnalysis(saved);
+        // Подключение канала — scrape; глубокий TGStat только в платном разборе CONTENT+
+        channelSyncService.syncForAnalysis(saved, false);
         ChannelEntity refreshed = channelRepository.findById(saved.getId()).orElse(saved);
         if (postIngestService.countPosts(refreshed.getId()) == 0) {
             throw new ChannelConnectException(

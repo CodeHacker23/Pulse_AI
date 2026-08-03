@@ -2,12 +2,15 @@ package org.example.pulse_ai.handler;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.pulse_ai.config.PulseAnalysisProperties;
 import org.example.pulse_ai.domain.analysis.AnalysisSnapshotService;
 import org.example.pulse_ai.domain.analysis.GeneratedPostService;
+import org.example.pulse_ai.domain.analysis.PostDraftService;
 import org.example.pulse_ai.domain.analysis.PostImageService;
 import org.example.pulse_ai.domain.publish.ChannelPublishService;
 import org.example.pulse_ai.domain.schedule.PostScheduleService;
 import org.example.pulse_ai.domain.schedule.SlotPerformanceService;
+import org.example.pulse_ai.domain.user.UserTimezoneService;
 import org.example.pulse_ai.persistence.entity.ScheduledPostEntity;
 import org.example.pulse_ai.keyboard.KeyboardFactory;
 import org.example.pulse_ai.persistence.entity.AnalysisRequestEntity;
@@ -21,6 +24,7 @@ import org.example.pulse_ai.session.BotState;
 import org.example.pulse_ai.session.UserSession;
 import org.example.pulse_ai.session.UserSessionService;
 import org.example.pulse_ai.stats.model.PublishSlotMetric;
+import org.example.pulse_ai.telegram.TelegramLimits;
 import org.example.pulse_ai.telegram.TelegramMessageSender;
 import org.example.pulse_ai.text.ConversionCopy;
 import org.example.pulse_ai.text.TgHtml;
@@ -41,11 +45,12 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class PublishHandler {
 
-    private static final ZoneId MSK = ZoneId.of("Europe/Moscow");
+    private static final ZoneId FALLBACK_MSK = ZoneId.of("Europe/Moscow");
     private static final DateTimeFormatter HUMAN_TIME = DateTimeFormatter.ofPattern("dd.MM HH:mm");
 
     private final GeneratedPostService generatedPostService;
     private final PostImageService imageService;
+    private final PostDraftService postDraftService;
     private final PostScheduleService scheduleService;
     private final SlotPerformanceService slotPerformanceService;
     private final ChannelPublishService publishService;
@@ -56,6 +61,8 @@ public class PublishHandler {
     private final TelegramMessageSender messageSender;
     private final KeyboardFactory keyboards;
     private final PollHandler pollHandler;
+    private final PulseAnalysisProperties analysisProperties;
+    private final UserTimezoneService timezoneService;
 
     public boolean handles(String callbackData) {
         return callbackData != null
@@ -86,6 +93,11 @@ public class PublishHandler {
             attachPhoto(chatId, messageId, user, postId, false);
             return;
         }
+        if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "shorten:")) {
+            long postId = parseId(callbackData, "shorten:");
+            shortenThenAttachPhoto(chatId, messageId, user, postId);
+            return;
+        }
         if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "rephoto:")) {
             long postId = parseId(callbackData, "rephoto:");
             attachPhoto(chatId, messageId, user, postId, true);
@@ -94,6 +106,11 @@ public class PublishHandler {
         if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "nophoto:")) {
             long postId = parseId(callbackData, "nophoto:");
             clearPhotoAndPreview(chatId, messageId, user, postId);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "when:")) {
+            long postId = parseId(callbackData, "when:");
+            showPublishWhen(chatId, messageId, user, postId);
             return;
         }
         if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "confirm:")) {
@@ -138,13 +155,26 @@ public class PublishHandler {
 
         ChannelPublishService.PublishReadiness readiness = publishService.checkReadiness(ctx.channel());
         if (!readiness.allowed()) {
-            messageSender.editText(chatId, messageId, ConversionCopy.publishBlocked(readiness.message()), keyboards.backToMainInline());
+            String blocked = ConversionCopy.publishBlocked(readiness.message());
+            InlineKeyboardMarkup kb = keyboards.publishBlockedInline();
+            if (messageId > 0) {
+                messageSender.editTextOrReplace(chatId, messageId, blocked, kb);
+            } else {
+                messageSender.sendTextWithInlineSafe(chatId, blocked, kb);
+            }
             return;
         }
 
         String preview = ConversionCopy.publishPreview(ctx.channel().getTitle(), text);
         if (ctx.post().getImageUrl() != null && !ctx.post().getImageUrl().isBlank()) {
+            if (!TelegramLimits.fitsPhotoCaption(text)) {
+                generatedPostService.setImageUrl(postId, null);
+                showCaptionTooLong(chatId, messageId, postId, text);
+                return;
+            }
             preview = "🖼 <i>Пост выйдет с фото</i>\n\n" + preview;
+        } else {
+            preview = preview + ConversionCopy.draftPhotoHint(TelegramLimits.fitsPhotoCaption(text));
         }
         InlineKeyboardMarkup keyboard = keyboards.publishPreviewInline(postId);
         if (messageId > 0) {
@@ -169,6 +199,11 @@ public class PublishHandler {
 
         UserSession session = sessionService.getOrCreate(chatId);
         String text = resolveDraftText(session, ctx.post());
+        if (!TelegramLimits.fitsPhotoCaption(text)) {
+            showCaptionTooLong(chatId, messageId, postId, text);
+            return;
+        }
+
         var found = another
                 ? imageService.anotherForPost(text, ctx.channel().getTitle())
                 : imageService.suggestForPost(text, ctx.channel().getTitle());
@@ -202,6 +237,68 @@ public class PublishHandler {
         }
     }
 
+    private void showCaptionTooLong(long chatId, int messageId, long postId, String text) {
+        int len = TelegramLimits.captionHtmlLength(text);
+        String msg = ConversionCopy.photoCaptionTooLong(len, TelegramLimits.overflowChars(text));
+        InlineKeyboardMarkup kb = keyboards.photoCaptionTooLongInline(postId);
+        if (messageId > 0) {
+            messageSender.editTextOrReplace(chatId, messageId, msg, kb);
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, msg, kb);
+        }
+    }
+
+    private void shortenThenAttachPhoto(long chatId, int messageId, UserEntity user, long postId) {
+        PostContext ctx = loadPostContext(postId, user).orElse(null);
+        if (ctx == null) {
+            messageSender.sendTextSafe(chatId, "❌ Черновик не найден.");
+            return;
+        }
+        UserSession session = sessionService.getOrCreate(chatId);
+        String text = resolveDraftText(session, ctx.post());
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, "✂️ Сокращаю текст под фото…", null);
+        } else {
+            messageSender.sendTextSafe(chatId, "✂️ Сокращаю текст под фото…");
+        }
+        String shortened = postDraftService.shortenForPhotoCaption(
+                text, analysisProperties.getLlmTimeoutSeconds());
+        generatedPostService.replaceText(postId, shortened);
+        session.setEditDraft(shortened);
+        session.setPostId(postId);
+        attachPhoto(chatId, messageId, user, postId, false);
+    }
+
+    private void showPublishWhen(long chatId, int messageId, UserEntity user, long postId) {
+        PostContext ctx = loadPostContext(postId, user).orElse(null);
+        if (ctx == null) {
+            messageSender.sendTextSafe(chatId, "❌ Черновик не найден.");
+            return;
+        }
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setPostId(postId);
+        session.setRequestId(ctx.request().getId());
+        session.setState(BotState.POST_PREVIEW);
+
+        boolean hasPhoto = ctx.post().getImageUrl() != null && !ctx.post().getImageUrl().isBlank();
+        String text = """
+                📤 <b>Когда опубликовать?</b>
+
+                Канал: «%s»
+                %s
+
+                Выберите: сразу в эфир или по расписанию.""".formatted(
+                TgHtml.esc(ctx.channel().getTitle()),
+                hasPhoto ? "🖼 С фото" : "Текст без фото");
+
+        InlineKeyboardMarkup keyboard = keyboards.publishWhenInline(postId);
+        if (messageId > 0) {
+            messageSender.editTextOrReplace(chatId, messageId, text, keyboard);
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, text, keyboard);
+        }
+    }
+
     private void clearPhotoAndPreview(long chatId, int messageId, UserEntity user, long postId) {
         generatedPostService.setImageUrl(postId, null);
         if (messageId > 0) {
@@ -231,15 +328,20 @@ public class PublishHandler {
         session.setPostId(postId);
         session.setRequestId(ctx.request().getId());
         session.setEditDraft(current);
+        session.setScheduledPostId(null);
         session.setState(BotState.POST_EDIT);
 
         String text = ConversionCopy.publishEditPrompt(current);
         InlineKeyboardMarkup keyboard = keyboards.publishEditInline(postId);
         if (messageId > 0) {
-            messageSender.editText(chatId, messageId, text, keyboard);
+            messageSender.editTextOrReplace(chatId, messageId, text, keyboard);
         } else {
             messageSender.sendTextWithInlineSafe(chatId, text, keyboard);
         }
+        // Сырой markdown отдельным сообщением — удобно копировать и править.
+        String raw = current.length() > 3500 ? current.substring(0, 3497) + "…" : current;
+        messageSender.sendTextSafe(chatId, "📋 <b>Исходник для копирования</b>\n<pre>"
+                + TgHtml.esc(raw) + "</pre>");
     }
 
     public void handleEditedText(long chatId, UserEntity user, String newText) {
@@ -247,11 +349,19 @@ public class PublishHandler {
         Long postId = session.getPostId();
         if (postId == null) {
             sessionService.resetToMainMenu(chatId);
+            messageSender.sendTextSafe(chatId,
+                    "Сессия редактирования сброшена. Откройте пост снова и нажмите «✏️ Править».");
             return;
         }
-        session.setEditDraft(newText.trim());
+        String trimmed = newText == null ? "" : newText.trim();
+        if (trimmed.isBlank()) {
+            messageSender.sendTextSafe(chatId, "Пустой текст. Пришлите текст поста одним сообщением.");
+            return;
+        }
+        generatedPostService.replaceText(postId, trimmed);
+        session.setEditDraft(trimmed);
         session.setState(BotState.POST_PREVIEW);
-        showPreview(chatId, 0, user, postId, newText.trim());
+        showPreview(chatId, 0, user, postId, trimmed);
     }
 
     private void confirmPublish(long chatId, int messageId, UserEntity user, long postId) {
@@ -265,8 +375,17 @@ public class PublishHandler {
         String finalText = resolveDraftText(session, ctx.post());
         session.setState(BotState.POST_CONFIRM);
 
-        if (messageId > 0) {
-            messageSender.editText(chatId, messageId, ConversionCopy.publishInProgress(ctx.channel().getTitle()), null);
+        String imageUrl = ctx.post().getImageUrl();
+        if (imageUrl != null && !imageUrl.isBlank() && !TelegramLimits.fitsPhotoCaption(finalText)) {
+            showCaptionTooLong(chatId, messageId, postId, finalText);
+            return;
+        }
+
+        // С фото-карточки messageId — это фото без текста; EditMessageText падает.
+        int uiMessageId = messageId;
+        if (uiMessageId > 0) {
+            uiMessageId = messageSender.editTextOrReplace(
+                    chatId, uiMessageId, ConversionCopy.publishInProgress(ctx.channel().getTitle()), null);
         }
 
         ChannelPublishService.PublishResult result = publishService.publish(
@@ -275,8 +394,8 @@ public class PublishHandler {
         if (!result.success()) {
             String errorText = ConversionCopy.publishFailed(result.error());
             InlineKeyboardMarkup keyboard = keyboards.publishFailedInline(postId, ctx.request().getId());
-            if (messageId > 0) {
-                messageSender.editText(chatId, messageId, errorText, keyboard);
+            if (uiMessageId > 0) {
+                messageSender.editTextOrReplace(chatId, uiMessageId, errorText, keyboard);
             } else {
                 messageSender.sendTextWithInlineSafe(chatId, errorText, keyboard);
             }
@@ -289,8 +408,8 @@ public class PublishHandler {
 
         String success = ConversionCopy.publishSuccess(ctx.channel().getTitle(), result.link());
         InlineKeyboardMarkup keyboard = keyboards.publishSuccessInline(ctx.request().getId());
-        if (messageId > 0) {
-            messageSender.editText(chatId, messageId, success, keyboard);
+        if (uiMessageId > 0) {
+            messageSender.editTextOrReplace(chatId, uiMessageId, success, keyboard);
         } else {
             messageSender.sendTextWithInlineSafe(chatId, success, keyboard);
         }
@@ -356,9 +475,10 @@ public class PublishHandler {
             case "open" -> showScheduleOptions(chatId, messageId, user, id);
             case "best" -> scheduleBest(chatId, messageId, user, id);
             case "1h" -> scheduleAt(chatId, messageId, user, id, Instant.now().plusSeconds(3600));
-            case "eve" -> scheduleAt(chatId, messageId, user, id, todayOrNextAt(18, 0, false));
-            case "morn" -> scheduleAt(chatId, messageId, user, id, todayOrNextAt(10, 0, true));
+            case "eve" -> scheduleAt(chatId, messageId, user, id, todayOrNextAt(user, 18, 0, false));
+            case "morn" -> scheduleAt(chatId, messageId, user, id, todayOrNextAt(user, 10, 0, true));
             case "custom" -> startCustomSchedule(chatId, messageId, user, id);
+            case "retime" -> startReschedule(chatId, messageId, user, id);
             case "cancel" -> cancelScheduled(chatId, messageId, user, id);
             default -> {
             }
@@ -376,13 +496,10 @@ public class PublishHandler {
         session.setRequestId(ctx.request().getId());
 
         PublishSlotMetric best = bestSlot(ctx.request().getId(), ctx.channel().getId());
-        String bestLabel = null;
         String bestBucket = null;
         StringBuilder text = new StringBuilder("📅 <b>Когда опубликовать?</b>\n\n");
         if (best != null) {
-            Instant when = nextSlotOccurrence(best.day(), best.time());
             bestBucket = best.time();
-            bestLabel = "🎯 " + HUMAN_TIME.format(ZonedDateTime.ofInstant(when, MSK)) + " — лучший охват";
             text.append("🎯 По вашей статистике сильнее всего заходят посты в <b>")
                     .append(TgHtml.esc(best.day().toLowerCase()))
                     .append("</b> около <b>").append(TgHtml.esc(best.time())).append("</b>");
@@ -391,30 +508,32 @@ public class PublishHandler {
             }
             text.append(".\n\n");
         }
-        text.append("Выберите время. <b>🔥</b> — часы с лучшим охватом по вашей статистике. Время по МСК.");
+        text.append("Выберите время. <b>🔥</b> — лучший охват по вашей статистике.");
         editOrSend(chatId, messageId, text.toString(),
-                keyboards.scheduleOptionsInline(postId, bestLabel, buildTimeSlots(bestBucket)));
+                keyboards.scheduleOptionsInline(postId, buildTimeSlots(user, bestBucket)));
     }
 
-    /** Кандидаты времени публикации на сегодня (будущие) и завтра; 🔥 помечает лучший временной интервал. */
-    private List<KeyboardFactory.TimeSlot> buildTimeSlots(String bestBucket) {
+    /** Кандидаты: только будущее (≥15 мин) в TZ юзера; 🔥 — бакет из статистики. */
+    private List<KeyboardFactory.TimeSlot> buildTimeSlots(UserEntity user, String bestBucket) {
         int[] hours = {9, 12, 15, 18, 21};
-        ZonedDateTime now = ZonedDateTime.now(MSK);
+        ZoneId zone = zoneOf(user);
+        Instant soonest = Instant.now().plusSeconds(15 * 60);
+        ZonedDateTime now = ZonedDateTime.now(zone);
         List<KeyboardFactory.TimeSlot> slots = new ArrayList<>();
-        for (int h : hours) {
-            ZonedDateTime today = now.withHour(h).withMinute(0).withSecond(0).withNano(0);
-            if (today.isAfter(now.plusMinutes(15))) {
-                slots.add(slot("Сегодня", today, bestBucket));
+        for (int dayOffset = 0; dayOffset <= 1 && slots.size() < 6; dayOffset++) {
+            String dayLabel = dayOffset == 0 ? "Сегодня" : "Завтра";
+            for (int h : hours) {
+                if (slots.size() >= 6) {
+                    break;
+                }
+                ZonedDateTime when = now.plusDays(dayOffset)
+                        .withHour(h).withMinute(0).withSecond(0).withNano(0);
+                if (!when.toInstant().isBefore(soonest)) {
+                    slots.add(slot(dayLabel, when, bestBucket));
+                }
             }
         }
-        for (int h : hours) {
-            if (slots.size() >= 6) {
-                break;
-            }
-            ZonedDateTime tomorrow = now.plusDays(1).withHour(h).withMinute(0).withSecond(0).withNano(0);
-            slots.add(slot("Завтра", tomorrow, bestBucket));
-        }
-        return slots.stream().limit(6).toList();
+        return slots;
     }
 
     private KeyboardFactory.TimeSlot slot(String dayLabel, ZonedDateTime when, String bestBucket) {
@@ -452,8 +571,8 @@ public class PublishHandler {
         }
         PublishSlotMetric best = bestSlot(ctx.request().getId(), ctx.channel().getId());
         Instant when = best != null
-                ? nextSlotOccurrence(best.day(), best.time())
-                : todayOrNextAt(19, 0, false);
+                ? nextSlotOccurrence(user, best.day(), best.time())
+                : todayOrNextAt(user, 19, 0, false);
         scheduleAt(chatId, messageId, user, postId, when);
     }
 
@@ -466,26 +585,74 @@ public class PublishHandler {
         UserSession session = sessionService.getOrCreate(chatId);
         session.setPostId(postId);
         session.setRequestId(ctx.request().getId());
+        session.setScheduledPostId(null);
         session.setState(BotState.SCHEDULE_TIME_INPUT);
-        String example = HUMAN_TIME.format(ZonedDateTime.now(MSK).plusDays(1).withHour(18).withMinute(0));
+        ZoneId zone = zoneOf(user);
+        String example = HUMAN_TIME.format(ZonedDateTime.now(zone).plusDays(1).withHour(18).withMinute(0));
         String text = "✏️ <b>Своё время</b>\n\n"
-                + "Пришлите дату и время в формате <b>ДД.ММ ЧЧ:ММ</b> (МСК).\n"
+                + "Пришлите дату и время в формате <b>ДД.ММ ЧЧ:ММ</b>.\n"
                 + "Например: <code>" + example + "</code>";
+        editOrSend(chatId, messageId, text, keyboards.backToMainInline());
+    }
+
+    private void startReschedule(long chatId, int messageId, UserEntity user, long scheduledId) {
+        ScheduledPostEntity item = scheduleService.find(scheduledId)
+                .filter(e -> e.getUserId().equals(user.getId())
+                        && e.getStatus() == org.example.pulse_ai.domain.schedule.ScheduledPostStatus.PENDING)
+                .orElse(null);
+        if (item == null) {
+            messageSender.sendTextSafe(chatId, "Запланированный пост не найден или уже опубликован.");
+            return;
+        }
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setScheduledPostId(scheduledId);
+        session.setPostId(null);
+        session.setState(BotState.SCHEDULE_TIME_INPUT);
+        ZoneId zone = zoneOf(user);
+        String current = HUMAN_TIME.format(ZonedDateTime.ofInstant(item.getScheduledAt(), zone));
+        String example = HUMAN_TIME.format(ZonedDateTime.now(zone).plusDays(1).withHour(18).withMinute(0));
+        String text = "🕐 <b>Новое время для #" + scheduledId + "</b>\n\n"
+                + "Сейчас: <b>" + current + "</b>\n"
+                + "Пришлите <b>ДД.ММ ЧЧ:ММ</b>, например <code>" + example + "</code>\n"
+                + "<i>/cancel — отмена</i>";
         editOrSend(chatId, messageId, text, keyboards.backToMainInline());
     }
 
     public void handleScheduleTimeInput(long chatId, UserEntity user, String rawText) {
         UserSession session = sessionService.getOrCreate(chatId);
+        Instant when = parseCustomTime(rawText, zoneOf(user));
+        if (when == null) {
+            messageSender.sendTextSafe(chatId,
+                    "Не понял время. Формат: <b>ДД.ММ ЧЧ:ММ</b>, например 25.07 18:30");
+            return;
+        }
+        if (when.isBefore(Instant.now().plusSeconds(30))) {
+            messageSender.sendTextSafe(chatId, "Это время уже прошло. Выберите время в будущем.");
+            return;
+        }
+
+        Long scheduledId = session.getScheduledPostId();
+        if (scheduledId != null) {
+            boolean ok = scheduleService.reschedule(scheduledId, user.getId(), when);
+            session.setScheduledPostId(null);
+            session.setState(BotState.MAIN_MENU);
+            if (!ok) {
+                messageSender.sendTextSafe(chatId, "Не удалось перенести #" + scheduledId + ".");
+                return;
+            }
+            ZoneId zone = zoneOf(user);
+            String whenStr = HUMAN_TIME.format(ZonedDateTime.ofInstant(when, zone));
+            List<ScheduledPostEntity> items = scheduleService.pending(user.getId());
+            messageSender.sendTextWithInlineSafe(chatId,
+                    "✅ #" + scheduledId + " перенесён на <b>" + whenStr + "</b>",
+                    items.isEmpty() ? keyboards.backToMainInline() : keyboards.scheduledListInline(items));
+            return;
+        }
+
         Long postId = session.getPostId();
         if (postId == null) {
             sessionService.resetToMainMenu(chatId);
             messageSender.sendTextSafe(chatId, "Черновик не найден. Откройте пост заново.");
-            return;
-        }
-        Instant when = parseCustomTime(rawText);
-        if (when == null) {
-            messageSender.sendTextSafe(chatId,
-                    "Не понял время. Формат: <b>ДД.ММ ЧЧ:ММ</b>, например 25.07 18:30");
             return;
         }
         scheduleAt(chatId, 0, user, postId, when);
@@ -505,7 +672,7 @@ public class PublishHandler {
         ChannelPublishService.PublishReadiness readiness = publishService.checkReadiness(ctx.channel());
         if (!readiness.allowed()) {
             editOrSend(chatId, messageId, ConversionCopy.publishBlocked(readiness.message()),
-                    keyboards.backToMainInline());
+                    keyboards.publishBlockedInline());
             return;
         }
 
@@ -526,11 +693,12 @@ public class PublishHandler {
         session.setLastRequestId(ctx.request().getId());
         session.setState(BotState.MAIN_MENU);
 
-        String whenStr = HUMAN_TIME.format(ZonedDateTime.ofInstant(when, MSK));
+        ZoneId zone = zoneOf(user);
+        String whenStr = HUMAN_TIME.format(ZonedDateTime.ofInstant(when, zone));
         boolean poll = GeneratedPostService.isPoll(ctx.post());
         String text = "📅 <b>" + (poll ? "Опрос запланирован" : "Пост запланирован") + "</b>\n\n"
                 + "Канал: «" + TgHtml.esc(ctx.channel().getTitle()) + "»\n"
-                + "Время: <b>" + whenStr + "</b> (МСК)"
+                + "Время: <b>" + whenStr + "</b>"
                 + (poll
                     ? "\n📊 Опрос · " + (ctx.post().isPollAnonymous() ? "анонимный" : "видно, кто голосовал")
                     : (imageUrl != null && !imageUrl.isBlank() ? "\n🖼 С фото" : ""))
@@ -551,7 +719,7 @@ public class PublishHandler {
                     keyboards.backToMainInline());
             return;
         }
-        editOrSend(chatId, messageId, scheduledListBody(items, null), keyboards.scheduledListInline(items));
+        editOrSend(chatId, messageId, scheduledListBody(user, items, null), keyboards.scheduledListInline(items));
     }
 
     private void cancelScheduled(long chatId, int messageId, UserEntity user, long id) {
@@ -564,31 +732,32 @@ public class PublishHandler {
             editOrSend(chatId, messageId, note + "\n\nБольше нет запланированных постов.",
                     keyboards.backToMainInline());
         } else {
-            editOrSend(chatId, messageId, scheduledListBody(items, note), keyboards.scheduledListInline(items));
+            editOrSend(chatId, messageId, scheduledListBody(user, items, note), keyboards.scheduledListInline(items));
         }
     }
 
-    private String scheduledListBody(List<ScheduledPostEntity> items, String note) {
+    private String scheduledListBody(UserEntity user, List<ScheduledPostEntity> items, String note) {
+        ZoneId zone = zoneOf(user);
         StringBuilder sb = new StringBuilder();
         if (note != null) {
             sb.append(note).append("\n\n");
         }
-        sb.append("📅 <b>Запланированные посты</b>\n\n");
+        sb.append("📅 <b>Запланированные посты</b>\n");
+        sb.append("<i>🕐 — сменить время · ❌ — отменить</i>\n\n");
         for (ScheduledPostEntity item : items) {
-            String whenStr = HUMAN_TIME.format(ZonedDateTime.ofInstant(item.getScheduledAt(), MSK));
+            String whenStr = HUMAN_TIME.format(ZonedDateTime.ofInstant(item.getScheduledAt(), zone));
             String preview = item.getFinalText() != null ? item.getFinalText() : "";
             preview = preview.replace('\n', ' ').trim();
             if (preview.length() > 60) {
                 preview = preview.substring(0, 57) + "…";
             }
-            sb.append("#").append(item.getId()).append(" · <b>").append(whenStr).append("</b> МСК\n")
+            sb.append("#").append(item.getId()).append(" · <b>").append(whenStr).append("</b>\n")
                     .append(TgHtml.esc(preview)).append("\n\n");
         }
         return sb.toString().trim();
     }
 
-    /** Ближайшее наступление слота: нужный день недели (если распознан) + час из "HH:mm". */
-    private Instant nextSlotOccurrence(String russianDay, String time) {
+    private Instant nextSlotOccurrence(UserEntity user, String russianDay, String time) {
         int hour = 19;
         int minute = 0;
         try {
@@ -596,9 +765,10 @@ public class PublishHandler {
             hour = Integer.parseInt(t[0].trim());
             minute = Integer.parseInt(t[1].trim());
         } catch (Exception ignored) {
-            // используем дефолт 19:00
+            // дефолт 19:00
         }
-        ZonedDateTime now = ZonedDateTime.now(MSK);
+        ZoneId zone = zoneOf(user);
+        ZonedDateTime now = ZonedDateTime.now(zone);
         ZonedDateTime candidate = now.withHour(hour).withMinute(minute).withSecond(0).withNano(0);
         java.time.DayOfWeek target = parseRussianDay(russianDay);
         if (target != null) {
@@ -629,8 +799,9 @@ public class PublishHandler {
         };
     }
 
-    private Instant todayOrNextAt(int hour, int minute, boolean forceTomorrow) {
-        ZonedDateTime now = ZonedDateTime.now(MSK);
+    private Instant todayOrNextAt(UserEntity user, int hour, int minute, boolean forceTomorrow) {
+        ZoneId zone = zoneOf(user);
+        ZonedDateTime now = ZonedDateTime.now(zone);
         ZonedDateTime candidate = now.withHour(hour).withMinute(minute).withSecond(0).withNano(0);
         if (forceTomorrow || !candidate.isAfter(now)) {
             candidate = candidate.plusDays(1);
@@ -638,7 +809,7 @@ public class PublishHandler {
         return candidate.toInstant();
     }
 
-    private Instant parseCustomTime(String raw) {
+    private Instant parseCustomTime(String raw, ZoneId zone) {
         try {
             String s = raw.trim().replaceAll("\\s+", " ");
             String[] parts = s.split(" ");
@@ -655,9 +826,9 @@ public class PublishHandler {
             int hour = Integer.parseInt(t[0]);
             int minute = Integer.parseInt(t[1]);
             boolean hasYear = d.length >= 3;
-            int year = hasYear ? normalizeYear(Integer.parseInt(d[2])) : ZonedDateTime.now(MSK).getYear();
-            ZonedDateTime when = LocalDateTime.of(year, month, day, hour, minute).atZone(MSK);
-            if (!hasYear && when.isBefore(ZonedDateTime.now(MSK))) {
+            int year = hasYear ? normalizeYear(Integer.parseInt(d[2])) : ZonedDateTime.now(zone).getYear();
+            ZonedDateTime when = LocalDateTime.of(year, month, day, hour, minute).atZone(zone);
+            if (!hasYear && when.isBefore(ZonedDateTime.now(zone))) {
                 when = when.plusYears(1);
             }
             return when.toInstant();
@@ -666,13 +837,21 @@ public class PublishHandler {
         }
     }
 
+    private ZoneId zoneOf(UserEntity user) {
+        if (user == null) {
+            return FALLBACK_MSK;
+        }
+        return timezoneService.zoneOf(user.getId());
+    }
+
     private static int normalizeYear(int y) {
         return y < 100 ? 2000 + y : y;
     }
 
     private void editOrSend(long chatId, int messageId, String text, InlineKeyboardMarkup keyboard) {
         if (messageId > 0) {
-            messageSender.editText(chatId, messageId, text, keyboard);
+            // С фото-карточки EditMessageText падает — заменяем сообщение
+            messageSender.editTextOrReplace(chatId, messageId, text, keyboard);
         } else {
             messageSender.sendTextWithInlineSafe(chatId, text, keyboard);
         }

@@ -87,14 +87,22 @@ public class TelegramPublicChannelScraper {
     }
 
     private static Integer parseSubscriberCount(Document doc) {
-        Element counter = doc.selectFirst("div.tgme_channel_info_counter");
-        if (counter == null) {
-            return null;
+        // На t.me несколько счётчиков подряд (subscribers / photos / videos / links).
+        // Берём только тот, у которого тип — подписчики, иначе легко схватить чужую цифру.
+        for (Element counter : doc.select("div.tgme_channel_info_counter")) {
+            Element typeEl = counter.selectFirst("span.counter_type");
+            String type = typeEl != null ? typeEl.text().toLowerCase() : "";
+            if (!type.contains("subscriber") && !type.contains("подписчик") && !type.contains("member")) {
+                continue;
+            }
+            Element valueEl = counter.selectFirst("span.counter_value");
+            String value = valueEl != null ? valueEl.text() : counter.text();
+            long parsed = parseCount(value);
+            if (parsed > 0 && parsed < Integer.MAX_VALUE) {
+                return (int) parsed;
+            }
         }
-        String value = counter.selectFirst("span.counter_value") != null
-                ? counter.selectFirst("span.counter_value").text()
-                : counter.text();
-        return (int) parseCount(value);
+        return null;
     }
 
     private ScrapedChannelPost parseMessage(Element message) {

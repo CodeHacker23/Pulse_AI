@@ -33,7 +33,7 @@ public class ChannelSyncService {
 
     @Transactional
     public SyncResult syncChannel(ChannelEntity channel) {
-        return syncForAnalysis(channel, false);
+        return syncInternal(channel, false, true);
     }
 
     /** Быстрый сбор для анализа: кэш, без медленного Bot API, один HTTP-запрос к t.me */
@@ -42,10 +42,26 @@ public class ChannelSyncService {
         return syncForAnalysis(channel, true);
     }
 
-    private SyncResult syncForAnalysis(ChannelEntity channel, boolean forAnalysis) {
+    /**
+     * @param useTgstat false — только scrape t.me (бесплатный слой); true — TGStat API если token есть
+     */
+    @Transactional
+    public SyncResult syncForAnalysis(ChannelEntity channel, boolean useTgstat) {
+        return syncInternal(channel, true, useTgstat);
+    }
+
+    private SyncResult syncInternal(ChannelEntity channel, boolean forAnalysis, boolean useTgstat) {
         boolean fast = forAnalysis && analysisProperties.isFastMode();
 
-        if (!fast || !analysisProperties.isSkipBotApiDuringSync()) {
+        // Подписчики: Bot API — источник правды, если бот в канале. Даже в fast-mode.
+        Integer botApiSubs = null;
+        if (channel.getTelegramChatId() != null) {
+            botApiSubs = botApi.getMemberCount(channel.getTelegramChatId()).orElse(null);
+            if (botApiSubs != null && botApiSubs > 0) {
+                channel.setSubscriberCount(botApiSubs);
+                channelRepository.save(channel);
+            }
+        } else if (!fast || !analysisProperties.isSkipBotApiDuringSync()) {
             refreshSubscriberCount(channel);
         }
 
@@ -53,30 +69,30 @@ public class ChannelSyncService {
         String category = null;
 
         if (channel.getUsername() != null && !channel.getUsername().isBlank()) {
-            // 1) Приоритет — официальный TGStat API (точные просмотры, даты, текст, реакции).
-            TgstatApiClient.PostsResult api = tgstatApiClient.getPosts(
-                    channel.getUsername(), analysisProperties.getSyncMaxPosts());
-            if (api.hasPosts()) {
-                category = api.category();
-                if (api.subscribers() != null && api.subscribers() > 0) {
-                    channel.setSubscriberCount(api.subscribers());
-                    channelRepository.save(channel);
+            boolean usedApi = false;
+            if (useTgstat) {
+                TgstatApiClient.PostsResult api = tgstatApiClient.getPosts(
+                        channel.getUsername(), analysisProperties.getSyncMaxPosts());
+                if (api.hasPosts()) {
+                    category = api.category();
+                    applyTrustedSubscriberCount(channel, api.subscribers(), botApiSubs);
+                    ingested = ingestBatch(channel, api.posts());
+                    usedApi = true;
+                    log.info("Sync канал {} через TGStat API: +{} постов", channel.getId(), ingested);
                 }
-                ingested = ingestBatch(channel, api.posts());
-                log.info("Sync канал {} через TGStat API: +{} постов", channel.getId(), ingested);
-            } else {
-                // 2) Фолбэк — публичный скрейпинг t.me/s/.
+            }
+            if (!usedApi) {
                 int maxPosts = fast ? analysisProperties.getSyncMaxPosts() : Math.max(analysisProperties.getMinPostsFull(), 30);
                 int maxPages = fast ? analysisProperties.getSyncMaxPages() : 3;
                 int timeoutMs = fast ? analysisProperties.getSyncTimeoutMs() : 20_000;
 
                 ScrapedChannelData data = publicScraper.fetchChannelData(
                         channel.getUsername(), maxPosts, maxPages, timeoutMs);
-                if (data.subscriberCount() != null) {
-                    channel.setSubscriberCount(data.subscriberCount());
-                    channelRepository.save(channel);
-                }
+                applyTrustedSubscriberCount(channel, data.subscriberCount(), botApiSubs);
                 ingested = ingestBatch(channel, data.posts());
+                if (!useTgstat) {
+                    log.info("Sync канал {} через t.me scrape (без TGStat): +{} постов", channel.getId(), ingested);
+                }
             }
         }
 
@@ -87,6 +103,30 @@ public class ChannelSyncService {
         }
         log.info("Sync канал {}: +{} постов, всего {}", channel.getId(), ingested, total);
         return new SyncResult(ingested, total, category, sanitized);
+    }
+
+    /**
+     * Не даём TGStat/telega/парсеру затереть Bot API цифру на микроканале
+     * (типичный баг: чужой «7.9K» вместо реальных 6).
+     */
+    private void applyTrustedSubscriberCount(ChannelEntity channel, Integer candidate, Integer botApiSubs) {
+        if (candidate == null || candidate <= 0) {
+            return;
+        }
+        int trustedFloor = botApiSubs != null && botApiSubs > 0
+                ? botApiSubs
+                : (channel.getSubscriberCount() != null ? channel.getSubscriberCount() : 0);
+        if (trustedFloor > 0 && trustedFloor <= 500 && candidate > trustedFloor * 5L) {
+            log.warn("Игнор подписчиков {} для @{}: есть доверенные {} (Bot API/БД)",
+                    candidate, channel.getUsername(), trustedFloor);
+            return;
+        }
+        if (botApiSubs != null && botApiSubs > 0) {
+            // Bot API уже записан — внешние источники не перетирают.
+            return;
+        }
+        channel.setSubscriberCount(candidate);
+        channelRepository.save(channel);
     }
 
     private int ingestBatch(ChannelEntity channel, List<ScrapedChannelPost> posts) {

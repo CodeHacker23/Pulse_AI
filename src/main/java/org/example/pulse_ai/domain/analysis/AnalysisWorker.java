@@ -44,6 +44,7 @@ public class AnalysisWorker {
     private final ChannelDeepAnalysisService deepAnalysisService;
     private final org.example.pulse_ai.stats.external.ExternalMetricsService externalMetricsService;
     private final org.example.pulse_ai.stats.external.TgstatApiClient tgstatApiClient;
+    private final org.example.pulse_ai.stats.external.TgstatAccessService tgstatAccessService;
     private final LiveProgressService liveProgressService;
     private final ChannelProfileService channelProfileService;
 
@@ -60,11 +61,12 @@ public class AnalysisWorker {
             progress = liveProgressService.start(chatId,
                     "📊 <b>Анализ канала</b>\n📢 " + org.example.pulse_ai.text.TgHtml.b(channel.getTitle()));
 
+            boolean useTgstat = tgstatAccessService.forAnalysis(request.getUserId(), request.getType());
             update(requestId, RequestStatus.COLLECTING_STATS, (short) 10, "Сбор постов");
             progress.step(0);
-            ChannelSyncService.SyncResult sync = channelSyncService.syncForAnalysis(channel);
-            log.info("Request {}: posts ready, total={}, sanitized={}, category={}",
-                    requestId, sync.totalPosts(), sync.sanitizedPosts(), sync.category());
+            ChannelSyncService.SyncResult sync = channelSyncService.syncForAnalysis(channel, useTgstat);
+            log.info("Request {}: posts ready, total={}, sanitized={}, category={}, tgstat={}",
+                    requestId, sync.totalPosts(), sync.sanitizedPosts(), sync.category(), useTgstat);
 
             update(requestId, RequestStatus.ANALYZING, (short) 30, "Расчёт метрик");
             progress.step(1);
@@ -97,9 +99,12 @@ public class AnalysisWorker {
             org.example.pulse_ai.stats.external.ExternalChannelMetrics external =
                     org.example.pulse_ai.stats.external.ExternalChannelMetrics.unavailable("skip", "");
             String externalSummary = null;
-            if (!sparseChannel && metrics.postCount() >= analysisProperties.getMinPostsFull()) {
+            if (!sparseChannel && metrics.postCount() >= analysisProperties.getMinPostsFull() && useTgstat) {
                 external = tgstatApiClient.getStat(channel.getUsername())
                         .orElseGet(() -> externalMetricsService.bestMetrics(channel.getUsername()));
+                if (external == null) {
+                    external = org.example.pulse_ai.stats.external.ExternalChannelMetrics.unavailable("skip", "");
+                }
                 if (isExternalMetricsTrustworthy(external, metrics, channelSubscribers)) {
                     externalSummary = externalMetricsService.describeForLlm(external);
                 } else {
@@ -109,9 +114,13 @@ public class AnalysisWorker {
             }
 
             Double errPercent = external != null && external.available() ? external.err() : null;
-            int subscribersForNiche = external != null && external.subscribers() != null
-                    ? external.subscribers()
-                    : channelSubscribers;
+            // Для ниши/профиля — только доверенные подписчики (не раздутый Telega).
+            int subscribersForNiche = channelSubscribers;
+            if (external != null && external.available() && external.subscribers() != null
+                    && isExternalMetricsTrustworthy(external, metrics, channelSubscribers)
+                    && (channelSubscribers <= 0 || external.subscribers() <= Math.max(channelSubscribers * 5L, channelSubscribers + 50L))) {
+                subscribersForNiche = external.subscribers();
+            }
             Double reachPercent = subscribersForNiche > 0 && metrics.avgViews() > 0
                     ? metrics.avgViews() * 100.0 / subscribersForNiche
                     : null;
@@ -152,12 +161,16 @@ public class AnalysisWorker {
             update(requestId, RequestStatus.GENERATING_IDEAS, (short) 85, "3 сильные идеи");
             progress.step(4);
             int ideaCount = billingProperties.ideasFor(request.getType());
+            String analysisBrief = AnalysisBriefForContent.fromSections(
+                    DeepAnalysisSections.parse(deepAnalysis));
             List<ContentIdeaEntity> ideas = ideasGenerationService.generateIdeas(
                     requestId,
                     channel.getTitle(),
                     metrics,
                     ideaCount,
-                    analysisProperties.getLlmTimeoutSeconds()
+                    analysisProperties.getLlmTimeoutSeconds(),
+                    List.of(),
+                    analysisBrief
             );
             snapshotService.saveIdeas(ideas);
             userService.addIdeasReceived(request.getUserId(), ideas.size());

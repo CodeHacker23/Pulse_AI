@@ -4,7 +4,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.pulse_ai.domain.outreach.OutreachCampaignService;
 import org.example.pulse_ai.persistence.entity.GroupParseJobEntity;
+import org.example.pulse_ai.persistence.entity.UserEntity;
 import org.example.pulse_ai.persistence.repository.GroupParseJobRepository;
+import org.example.pulse_ai.persistence.repository.UserRepository;
+import org.example.pulse_ai.telegram.TelegramMessageSender;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,11 +20,16 @@ import java.util.List;
 public class GroupMemberParseService {
 
     private static final int PARSE_LIMIT = 500;
+    /** warm+ : отсекает cold/dead и ботов без username. */
+    private static final int MIN_SCORE = 35;
 
     private final GroupParseJobRepository jobRepository;
     private final ScoutAccountService scoutAccountService;
     private final ScoutSessionGateway scoutGateway;
     private final OutreachCampaignService campaignService;
+    private final ScoutActionLogService actionLogService;
+    private final UserRepository userRepository;
+    private final TelegramMessageSender messageSender;
 
     @Transactional
     public GroupParseJobEntity queueParse(Long userId, Long campaignId, String groupLink) {
@@ -45,44 +53,74 @@ public class GroupMemberParseService {
         job.setStatus("RUNNING");
         jobRepository.save(job);
 
-        var accountOpt = scoutAccountService.pickOutreachAccount();
+        var accountOpt = scoutAccountService.pickParserAccount();
         if (accountOpt.isEmpty()) {
-            accountOpt = scoutAccountService.activeOutreach().stream().findFirst();
-        }
-        if (accountOpt.isEmpty()) {
-            fail(job, "Нет scout-аккаунта. Добавьте запись в scout_accounts.");
+            fail(job, "Нет PARSER/OBSERVER-аккаунта. Sender'ы не парсят — добавьте scout PARSER.");
+            notifyOwner(job, "⚠️ Парсинг не стартовал: нет PARSER-аккаунта в sidecar.");
             return;
         }
 
-        ScoutSessionGateway.ParseMembersResult result = scoutGateway.parseGroupMembers(
-                accountOpt.get().getId(), job.getGroupLink(), PARSE_LIMIT);
+        // Сначала join — иначе закрытые/invite-ссылки не откроются.
+        ScoutSessionGateway.JoinResult join = scoutGateway.joinChat(accountOpt.get().getId(), job.getGroupLink());
+        if (!join.ok()) {
+            log.info("Join before parse #{}: {}", job.getId(), join.error());
+        }
+
+        ScoutSessionGateway.ParseAudienceResult result = scoutGateway.parseAudience(
+                accountOpt.get().getId(), job.getGroupLink(), PARSE_LIMIT, MIN_SCORE);
         if (!result.ok()) {
+            actionLogService.fail(accountOpt.get().getId(), job.getUserId(), "GROUP_PARSE",
+                    job.getGroupLink(), result.error());
             fail(job, result.error());
+            notifyOwner(job, "⚠️ Парсинг не удался: " + humanizeParseError(result.error()));
             return;
         }
+
+        List<ScoutSessionGateway.AudienceMember> users = result.users();
+        long hot = users.stream().filter(u -> "hot".equals(u.tier())).count();
+        long warm = users.stream().filter(u -> "warm".equals(u.tier())).count();
 
         int added = 0;
         if (job.getCampaignId() != null) {
             StringBuilder sb = new StringBuilder();
-            for (String u : result.usernames()) {
+            for (ScoutSessionGateway.AudienceMember u : users) {
                 if (sb.length() > 0) {
                     sb.append('\n');
                 }
-                sb.append('@').append(u);
+                sb.append('@').append(u.username());
             }
             try {
                 added = campaignService.importUsernames(job.getUserId(), job.getCampaignId(), sb.toString());
             } catch (Exception ex) {
+                actionLogService.fail(accountOpt.get().getId(), job.getUserId(), "GROUP_PARSE",
+                        job.getGroupLink(), ex.getMessage());
                 fail(job, ex.getMessage());
+                notifyOwner(job, "⚠️ Парсинг: ошибка импорта — " + ex.getMessage());
                 return;
             }
         }
 
+        int found = added > 0 ? added : users.size();
         job.setStatus("DONE");
-        job.setMembersFound(added > 0 ? added : result.usernames().size());
+        job.setMembersFound(found);
         job.setCompletedAt(Instant.now());
         jobRepository.save(job);
-        log.info("Group parse job #{} done: {} members", job.getId(), job.getMembersFound());
+        actionLogService.ok(accountOpt.get().getId(), job.getUserId(), "GROUP_PARSE",
+                job.getGroupLink() + " → " + found + " (hot=" + hot + " warm=" + warm + ")");
+        log.info("Group parse job #{} done: {} liquid members", job.getId(), found);
+
+        String title = join.title() != null && !join.title().isBlank() ? join.title() : job.getGroupLink();
+        String msg = "✅ <b>Парсинг ЦА готов</b>\n"
+                + "«" + title + "»\n\n"
+                + "Живых с @username: <b>" + found + "</b>\n"
+                + "• hot: <b>" + hot + "</b> · warm: <b>" + warm + "</b>\n"
+                + "<i>Мёртвые, боты и без username отсеяны (score ≥ " + MIN_SCORE + ").</i>";
+        if (job.getCampaignId() != null) {
+            msg += "\n\nДобавлено в кампанию #" + job.getCampaignId() + ": <b>" + added + "</b>.";
+        } else {
+            msg += "\n\nСписок можно забрать в рассылку — 📨 Рассылка → импорт @username.";
+        }
+        notifyOwner(job, msg);
     }
 
     private void fail(GroupParseJobEntity job, String error) {
@@ -90,5 +128,22 @@ public class GroupMemberParseService {
         job.setLastError(error);
         job.setCompletedAt(Instant.now());
         jobRepository.save(job);
+    }
+
+    private void notifyOwner(GroupParseJobEntity job, String text) {
+        userRepository.findById(job.getUserId()).map(UserEntity::getTelegramId).ifPresent(tgId ->
+                messageSender.sendTextSafe(tgId, text));
+    }
+
+    static String humanizeParseError(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "неизвестная ошибка";
+        }
+        String e = raw.toLowerCase();
+        if (e.contains("chat admin") || e.contains("getparticipants") || e.contains("privileges")) {
+            return "Список участников закрыт (нужна админка или парсим по сообщениям). "
+                    + "Зайди парсером в группу / возьми публичный суперчат. Детали: " + raw;
+        }
+        return raw;
     }
 }

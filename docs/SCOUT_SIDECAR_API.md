@@ -1,6 +1,8 @@
 # Scout Sidecar API (MTProto)
 
-Java-бот вызывает sidecar (Python Telethon / TDLib) по REST.
+Java-бот вызывает sidecar (Python Telethon) по REST.
+
+**Код sidecar:** [`scout-sidecar/README.md`](../scout-sidecar/README.md)
 
 Base URL: `pulse.scout.sidecar-url`, напр. `http://127.0.0.1:8090`
 

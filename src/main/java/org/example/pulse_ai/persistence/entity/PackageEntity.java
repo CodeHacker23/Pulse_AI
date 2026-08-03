@@ -45,4 +45,19 @@ public class PackageEntity {
 
     @Column(name = "includes_priority", nullable = false)
     private boolean includesPriority;
+
+    /** ANALYSIS | ASSISTANT | LS_TOPUP */
+    @Column(nullable = false, length = 16)
+    private String kind = "ANALYSIS";
+
+    /** Квота исходящих ЛС в месяц (подписка) или объём допа. */
+    @Column(name = "dm_quota", nullable = false)
+    private int dmQuota;
+
+    /** Парсинг своих ссылок / мес (подписка). */
+    @Column(name = "parse_quota", nullable = false)
+    private int parseQuota;
+
+    @Column(name = "includes_find_audience", nullable = false)
+    private boolean includesFindAudience;
 }

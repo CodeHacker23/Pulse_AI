@@ -11,34 +11,29 @@ import org.example.pulse_ai.stats.model.PostMetric;
 import org.example.pulse_ai.stats.model.TopicMetric;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class IdeasGenerationService {
 
+  private static final ZoneId MSK = ZoneId.of("Europe/Moscow");
+  private static final DateTimeFormatter DAY_FMT = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+
   private static final String SYSTEM_PROMPT = """
       Ты — копирайтер ЭТОГО Telegram-канала. Пишешь как человек из его команды, не «нейросеть».
-      Заголовки (title) — это уже первая строка поста: человек видит только её в ленте и решает, тапнуть или нет.
+      Заголовки (title) — первая строка поста в ленте: по ней решают, открыть или пролистать.
+      Если в запросе есть бриф разбора — закрывай просадки и шаги роста в первую очередь.
 
-      СТИЛЬ:
-      • Копируй интонацию и ритм топ-постов канала (короткие/длинные фразы, обращение на «вы»/«ты»).
-      • Не меняй нишу: если канал про X — идеи только про X и жизнь ЦА этого канала.
-      • Каждая идея = конкретная ситуация/боль/цифра из мира ЦА, не абстрактный совет.
-
-      ФОРМУЛА title (до 10–12 слов):
-      1) крючок в первых 4–6 словах (цифра, конфликт, узнаваемая ситуация);
-      2) обещание пользы или интрига без спойлера всего поста;
-      3) звучит так, будто это написал админ ЭТОГО канала, а не чужой блог.
-
-      Запрещено в title: «в этом посте», «разберём», «полезные советы», «секреты успеха»,
-      «как прокачать», «5 способов», «вы узнаете», стендап, кринж, чужая ниша.
-
-      reason — одно предложение: почему ЭТА ЦА канала кликнет именно на этот заголовок.
-      Ответ — ТОЛЬКО валидный JSON, без markdown.""";
+      Перед генерацией мысленно зафиксируй 2–3 фразы голоса канала из примеров — в ответ их НЕ выводи.
+      Ответ — ТОЛЬКО валидный JSON, без markdown и без пояснений вне JSON.""";
 
   private final LlmService llmService;
   private final ObjectMapper objectMapper;
@@ -49,7 +44,7 @@ public class IdeasGenerationService {
       AnalysisMetrics metrics,
       int ideaCount
   ) {
-    return generateIdeas(requestId, channelTitle, metrics, ideaCount, 60);
+    return generateIdeas(requestId, channelTitle, metrics, ideaCount, 60, List.of());
   }
 
   public List<ContentIdeaEntity> generateIdeas(
@@ -59,18 +54,47 @@ public class IdeasGenerationService {
       int ideaCount,
       int timeoutSeconds
   ) {
+    return generateIdeas(requestId, channelTitle, metrics, ideaCount, timeoutSeconds, List.of());
+  }
+
+  public List<ContentIdeaEntity> generateIdeas(
+      Long requestId,
+      String channelTitle,
+      AnalysisMetrics metrics,
+      int ideaCount,
+      int timeoutSeconds,
+      List<String> excludeTitles
+  ) {
+    return generateIdeas(requestId, channelTitle, metrics, ideaCount, timeoutSeconds, excludeTitles, null);
+  }
+
+  public List<ContentIdeaEntity> generateIdeas(
+      Long requestId,
+      String channelTitle,
+      AnalysisMetrics metrics,
+      int ideaCount,
+      int timeoutSeconds,
+      List<String> excludeTitles,
+      String analysisBrief
+  ) {
     try {
-      String userPrompt = buildPrompt(channelTitle, metrics, ideaCount);
+      String userPrompt = buildPrompt(channelTitle, metrics, ideaCount, excludeTitles, analysisBrief);
       String json = llmService.completeJsonWithTimeout(
           SYSTEM_PROMPT, userPrompt, timeoutSeconds);
-      return parseIdeas(requestId, json, ideaCount, metrics);
+      return parseIdeas(requestId, json, ideaCount, metrics, excludeTitles);
     } catch (Exception ex) {
       log.warn("LLM ideas failed ({}s), using fallback: {}", timeoutSeconds, ex.getMessage());
       return fallbackIdeas(requestId, metrics, ideaCount);
     }
   }
 
-  private String buildPrompt(String channelTitle, AnalysisMetrics metrics, int ideaCount) {
+  private String buildPrompt(
+      String channelTitle,
+      AnalysisMetrics metrics,
+      int ideaCount,
+      List<String> excludeTitles,
+      String analysisBrief
+  ) {
     StringBuilder topPosts = new StringBuilder();
     for (PostMetric post : metrics.topPosts()) {
       topPosts.append("• «").append(post.title()).append("» — ")
@@ -98,38 +122,84 @@ public class IdeasGenerationService {
       topics.append("—\n");
     }
 
+    StringBuilder excluded = new StringBuilder();
+    if (excludeTitles != null) {
+      for (String t : excludeTitles) {
+        if (t != null && !t.isBlank()) {
+          excluded.append("• «").append(t.trim()).append("»\n");
+        }
+      }
+    }
+    if (excluded.isEmpty()) {
+      excluded.append("— нет\n");
+    }
+
+    String brief = analysisBrief != null && !analysisBrief.isBlank()
+        ? analysisBrief.trim()
+        : "— брифа нет: ориентируйся на голос канала и рабочие темы";
+
+    String today = LocalDate.now(MSK).format(DAY_FMT);
+
     return """
         Канал: «%s»
-        Придумай ровно %d идей постов на ближайшие 7–14 дней. Каждая идея — под стиль и ЦА ЭТОГО канала.
 
-        Голос канала (изучи формулировки топ-постов и пиши В ТОМ ЖЕ ключе, не копируй темы дословно):
+        ЗАДАЧА
+        Придумай ровно %d идей постов на ближайшие 7–14 дней (текущая дата: %s).
+        Каждая идея — под стиль, интонацию и ЦА ИМЕННО ЭТОГО канала.
+
+        ШАГ 0 (мысленно, в JSON не пиши)
+        Зафиксируй 2–3 характерные фразы/интонации из «голоса канала» ниже.
+        Дальше пиши строго в этом ключе; перед выводом сверь каждый title с этим голосом.
+
+        ИСКЛЮЧИТЬ (уже в контент-плане — тему не повторять и не перефразировать близко):
         %s
 
-        Что НЕ зашло (не повторяй такой тон/форму):
+        ГОЛОС КАНАЛА (формулировки топ-постов; темы не копируй):
         %s
 
-        Работающие темы ниши:
+        ЧТО НЕ ЗАШЛО (не повторять тон / форму / структуру заголовка):
         %s
 
-        Контекст: %d постов в разборе%s, лучшее время: %s
+        РАБОЧИЕ ТЕМЫ НИШИ:
+        %s
 
-        Примеры ПЛОХИХ title (так НЕ пиши):
+        КОНТЕКСТ: %d постов в разборе%s, лучшее время: %s
+
+        БРИФ РАЗБОРА (просадки и шаги роста — закрывай их идеями):
+        %s
+
+        ПРАВИЛА ДЛЯ TITLE
+        - Готовый заголовок / первая строка поста, цепляет уже в списке идей.
+        - До 90 символов.
+        - Не повторяй одну синтаксическую конструкцию дважды подряд.
+        - Крючок не обманывает: пост логически раскроет обещание title.
+        - Чередуй ТИПЫ крючков: личная история / цифра-факт / вопрос-провокация / антитеза «раньше→теперь» / признание ошибки.
+        - Примеры ниже — только про ТИП крючка, не копируй их синтаксис.
+
+        ПЛОХИЕ TITLE:
         ✗ «Смешная история про вашу нишу»
         ✗ «5 советов как улучшить контент»
         ✗ «Почему важно развивать канал в 2026»
         ✗ «Разберём главные тренды отрасли»
 
-        Примеры СИЛЬНЫХ title (адаптируй под нишу и голос канала):
+        СИЛЬНЫЕ TITLE (адаптируй под нишу и голос):
         ✓ «Потратил 40 часов на X — ошибка оказалась в одной строчке»
         ✓ «Опрос: сколько вы реально тратите на Y? (честно)»
         ✓ «Клиент попросил Z. Показываю, что вышло — без прикрас»
         ✓ «Мне 3 года говорили «делай так». Перестал — просмотры выросли»
 
-        Требования:
-        - title: готовый заголовок/первая строка поста — должен цеплять УЖЕ в этом списке идей;
-        - reason: 1 предложение — почему кликнет именно ЦА этого канала;
-        - format: longread | короткий | опрос | кейс;
-        - suggested_day: день недели на русском.
+        ФОРМАТЫ И БАЛАНС
+        format: longread | короткий | опрос | кейс
+        Длины при черновике: короткий ≤400; кейс/средний 600–900; longread 800–1000 (не 1500 — лимит Telegram + фото).
+        %s
+
+        ДНИ
+        suggested_day — день недели на русском. Если идей ≤ 7 — без повторов дня.
+
+        ПОЛЯ
+        - closes_gap: какую просадку из брифа закрывает (напр. «скучные первые строки», «однообразие форматов»). Нет брифа → «н/д».
+        - reason: одно предложение с конкретной эмоцией/болью ЦА (страх, жадность, узнавание, любопытство…) — не «это интересно аудитории».
+        - cta: короткий призыв в конец поста (вопрос / голосование / «напишите в комментарии»).
 
         Верни JSON:
         {
@@ -138,41 +208,70 @@ public class IdeasGenerationService {
               "title": "string",
               "reason": "string",
               "format": "string",
-              "suggested_day": "string"
+              "suggested_day": "string",
+              "closes_gap": "string",
+              "cta": "string"
             }
           ]
         }
         """.formatted(
         channelTitle,
         ideaCount,
+        today,
+        excluded.toString().trim(),
         topPosts.toString().trim(),
         weakPosts.toString().trim(),
         topics.toString().trim(),
         metrics.postCount(),
         metrics.avgViews() > 0 ? (", ~" + metrics.avgViews() + " просм. в среднем") : "",
-        metrics.bestTimeSummary()
+        metrics.bestTimeSummary(),
+        brief,
+        formatBalanceRules(ideaCount)
     );
   }
 
+  private static String formatBalanceRules(int n) {
+    if (n <= 3) {
+      return "Из " + n + " идей: все форматы разные, без повторов.";
+    }
+    if (n <= 6) {
+      return "Из " + n + " идей: минимум 1 кейс и 1 опрос; не более 2 одинаковых форматов подряд.";
+    }
+    return "Из " + n + " идей: минимум 2 кейса и 1 опрос; longread/короткий чередуй — не более 2 одинаковых подряд.";
+  }
+
   private List<ContentIdeaEntity> parseIdeas(
-      Long requestId, String json, int ideaCount, AnalysisMetrics metrics
+      Long requestId, String json, int ideaCount, AnalysisMetrics metrics, List<String> excludeTitles
   ) throws Exception {
+    Set<String> excludeKeys = new java.util.HashSet<>();
+    if (excludeTitles != null) {
+      for (String t : excludeTitles) {
+        excludeKeys.add(ContentPlanService.topicKey(t));
+      }
+    }
     JsonNode root = objectMapper.readTree(cleanJson(json));
     JsonNode ideasNode = root.path("ideas");
     List<ContentIdeaEntity> ideas = new ArrayList<>();
-    for (int i = 0; i < ideasNode.size() && i < ideaCount; i++) {
+    for (int i = 0; i < ideasNode.size() && ideas.size() < ideaCount; i++) {
       JsonNode node = ideasNode.get(i);
       String title = node.path("title").asText("").trim();
       if (title.isBlank() || looksGeneric(title)) {
         continue;
       }
+      if (excludeKeys.contains(ContentPlanService.topicKey(title))) {
+        continue;
+      }
       ContentIdeaEntity idea = new ContentIdeaEntity();
       idea.setRequestId(requestId);
       idea.setSortOrder((short) (ideas.size() + 1));
-      idea.setTitle(title);
+      idea.setTitle(title.length() > 90 ? title.substring(0, 87) + "…" : title);
       idea.setReason(node.path("reason").asText("Цепляет на боли аудитории канала."));
-      idea.setFormat(node.path("format").asText("короткий"));
+      idea.setFormat(normalizeFormat(node.path("format").asText("короткий")));
       idea.setSuggestedDay(node.path("suggested_day").asText(defaultDay(metrics)));
+      String gap = node.path("closes_gap").asText("").trim();
+      idea.setClosesGap(gap.isBlank() ? "н/д" : shorten(gap, 240));
+      String cta = node.path("cta").asText("").trim();
+      idea.setCta(cta.isBlank() ? null : shorten(cta, 500));
       ideas.add(idea);
     }
     if (ideas.isEmpty()) {
@@ -183,6 +282,23 @@ public class IdeasGenerationService {
       break;
     }
     return ideas.stream().limit(ideaCount).toList();
+  }
+
+  private static String normalizeFormat(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return "короткий";
+    }
+    String t = raw.toLowerCase(Locale.ROOT);
+    if (t.contains("опрос") || t.contains("poll")) {
+      return "опрос";
+    }
+    if (t.contains("кейс") || t.contains("case")) {
+      return "кейс";
+    }
+    if (t.contains("long") || t.contains("длин")) {
+      return "longread";
+    }
+    return "короткий";
   }
 
   /** Отсекает шаблонные заголовки, которые LLM любит выдавать под видом «крючка». */
@@ -217,15 +333,21 @@ public class IdeasGenerationService {
         idea.setReason("Топ-пост набрал " + ref.views()
             + " просм. — аудитория уже доказала интерес к этой теме.");
         idea.setFormat(i == 0 ? "опрос" : "кейс");
+        idea.setClosesGap("н/д");
+        idea.setCta("А у вас так было? Напишите в комментарии.");
       } else if (!metrics.workingTopics().isEmpty()) {
         TopicMetric topic = metrics.workingTopics().get(i % metrics.workingTopics().size());
         idea.setTitle("«" + topic.topic() + "»: одна ошибка, из-за которой теряют просмотры");
         idea.setReason("Тема даёт ~" + topic.avgViews() + " просм. — усильте конкретикой и цифрой в заголовке.");
         idea.setFormat("короткий");
+        idea.setClosesGap("н/д");
+        idea.setCta("Согласны? Плюсаните в комментариях.");
       } else {
         idea.setTitle("Опрос: что вас бесит больше всего в [нише канала]?");
         idea.setReason("Интерактив собирает просмотры даже без реакций — люди хотят высказаться.");
         idea.setFormat("опрос");
+        idea.setClosesGap("н/д");
+        idea.setCta("Голосуйте и допишите свой вариант.");
       }
 
       idea.setSuggestedDay(switch (i % 3) {

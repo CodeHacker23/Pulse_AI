@@ -47,7 +47,8 @@ public class ChannelPulseBot extends TelegramLongPollingBot {
     public void onUpdateReceived(Update update) {
         try {
             updateHandler.handle(update);
-        } catch (Exception ex) {
+        } catch (Throwable ex) {
+            // Важно: NoClassDefFoundError и др. Error — иначе умирает Telegram Executor и кнопки «молчат»
             log.error("Ошибка обработки update", ex);
         }
     }

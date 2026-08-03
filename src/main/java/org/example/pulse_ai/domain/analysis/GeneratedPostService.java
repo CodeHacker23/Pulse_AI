@@ -41,6 +41,9 @@ public class GeneratedPostService {
         post.setVariantA(text);
         post.setContentType("TEXT");
         post.setPollOptions(null);
+        if (idea.getCta() != null && !idea.getCta().isBlank()) {
+            post.setCta(idea.getCta());
+        }
         return repository.save(post);
     }
 
@@ -138,6 +141,15 @@ public class GeneratedPostService {
     @Transactional(readOnly = true)
     public Optional<GeneratedPostEntity> findByRequestAndIdea(long requestId, long ideaId) {
         return repository.findByRequestIdAndIdeaId(requestId, ideaId);
+    }
+
+    @Transactional
+    public void replaceText(long postId, String text) {
+        repository.findById(postId).ifPresent(post -> {
+            post.setVariantA(text);
+            post.setVariantB(null);
+            repository.save(post);
+        });
     }
 
     public String latestText(GeneratedPostEntity post) {

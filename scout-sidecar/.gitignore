@@ -1,0 +1,11 @@
+.env
+accounts.json
+accounts.secrets.json
+proxies.json
+proxy_assignments.json
+sessions/
+tdata-import/
+_tdata_probe/
+.venv/
+__pycache__/
+*.pyc

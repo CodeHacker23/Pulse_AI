@@ -5,9 +5,12 @@ import org.example.pulse_ai.config.PulseProductChannelProperties;
 import org.example.pulse_ai.domain.product.ProductChannelReportService;
 import org.example.pulse_ai.domain.product.ProductChannelService;
 import org.example.pulse_ai.domain.product.ProductPostRubric;
+import org.example.pulse_ai.domain.product.ProductReleaseService;
+import org.example.pulse_ai.domain.product.ProductStoryService;
 import org.example.pulse_ai.domain.product.ProductStyleLearnerService;
 import org.example.pulse_ai.keyboard.KeyboardFactory;
 import org.example.pulse_ai.persistence.entity.ProductChannelPostEntity;
+import org.example.pulse_ai.persistence.entity.ProductReleaseEntity;
 import org.example.pulse_ai.persistence.entity.UserEntity;
 import org.example.pulse_ai.session.BotState;
 import org.example.pulse_ai.session.UserSession;
@@ -17,6 +20,9 @@ import org.example.pulse_ai.text.TgHtml;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Component
 @RequiredArgsConstructor
 public class ProductChannelHandler {
@@ -25,6 +31,8 @@ public class ProductChannelHandler {
     private final ProductChannelService productChannelService;
     private final ProductStyleLearnerService styleLearner;
     private final ProductChannelReportService reportService;
+    private final ProductReleaseService releaseService;
+    private final ProductStoryService storyService;
     private final UserSessionService sessionService;
     private final TelegramMessageSender messageSender;
     private final KeyboardFactory keyboards;
@@ -39,10 +47,14 @@ public class ProductChannelHandler {
                     📢 <b>Канал Pulse AI</b>
 
                     Эта команда только для владельца продукта.
-                    Ваш Telegram ID: <code>%d</code> — добавьте в <code>owner-telegram-ids</code> в конфиге.
+                    Ваш Telegram ID: <code>%d</code>
 
-                    Для анализа своего канала перешлите пост из канала (бот должен быть админом) или пришлите ссылку.""".formatted(
-                    user.getTelegramId()));
+                    В <code>application-local.yaml</code> должно быть:
+                    <code>pulse.product.owner-telegram-ids: [%d]</code>
+                    (это ваш user id, не id канала)
+
+                    Перезапустите бота после правки конфига.""".formatted(
+                    user.getTelegramId(), user.getTelegramId()));
             return;
         }
         ProductChannelService.ChannelReadiness readiness = productChannelService.checkChannel();
@@ -61,8 +73,10 @@ public class ProductChannelHandler {
                         <b>Не live:</b> async-посты (утренний бриф, новости, фичи бота).
 
                         1️⃣ «🔄 Учиться с каналов» — бот смотрит референсы и запоминает стиль
-                        2️⃣ Выберите рубрику — черновик → правка → публикация
-                        3️⃣ «📊 Отчёт» — статистика канала и публикаций""".formatted(channelLine),
+                        2️⃣ «📖 Сюжет канала» — серия постов-знакомство (не один вброс)
+                        3️⃣ «🛠 Релизы» — факты апдейтов → Changelog
+                        4️⃣ Рубрика — черновик → правка → публикация
+                        5️⃣ «📊 Отчёт» — статистика""".formatted(channelLine),
                 keyboards.productMenuInline()
         );
     }
@@ -106,6 +120,40 @@ public class ProductChannelHandler {
             handleReport(chatId, messageId);
             return;
         }
+        if (callbackData.equals(CallbackData.PRODUCT_RELEASES)) {
+            showReleases(chatId, messageId);
+            return;
+        }
+        if (callbackData.equals(CallbackData.PRODUCT_RELEASE_ADD)) {
+            startAddRelease(chatId, messageId);
+            return;
+        }
+        if (callbackData.equals(CallbackData.PRODUCT_RELEASE_LATEST)) {
+            generateLatestChangelog(chatId, messageId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.PRODUCT_STORY)
+                || callbackData.equals(CallbackData.PRODUCT_STORY_SHOW)) {
+            showStory(chatId, messageId);
+            return;
+        }
+        if (callbackData.equals(CallbackData.PRODUCT_STORY_BUILD)) {
+            buildStory(chatId, messageId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.PRODUCT_STORY_NEXT)) {
+            publishStoryNext(chatId, messageId, user);
+            return;
+        }
+        if (callbackData.equals(CallbackData.PRODUCT_STORY_START)) {
+            startStoryArc(chatId, messageId, user);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_PRODUCT + "relpost:")) {
+            long releaseId = Long.parseLong(callbackData.substring((CallbackData.PREFIX_PRODUCT + "relpost:").length()));
+            generateFromRelease(chatId, messageId, user, releaseId);
+            return;
+        }
         if (callbackData.startsWith(CallbackData.PREFIX_PRODUCT + "gen:")) {
             String rubricCode = callbackData.substring((CallbackData.PREFIX_PRODUCT + "gen:").length());
             generate(chatId, messageId, user, ProductPostRubric.valueOf(rubricCode));
@@ -138,6 +186,221 @@ public class ProductChannelHandler {
         session.setProductEditDraft(text.trim());
         session.setState(BotState.PRODUCT_PREVIEW);
         showPreview(chatId, 0, postId, text.trim());
+    }
+
+    public void handleReleaseInput(long chatId, UserEntity user, String text) {
+        try {
+            ProductReleaseEntity saved = releaseService.addFromRawText(text);
+            sessionService.getOrCreate(chatId).setState(BotState.MAIN_MENU);
+            messageSender.sendTextWithInlineSafe(chatId, """
+                    ✅ <b>Релиз сохранён</b>
+
+                    <code>%s</code> — %s
+                    Статус: READY
+
+                    Можешь сразу собрать патчноут в канал.""".formatted(
+                    TgHtml.esc(saved.getVersion()),
+                    TgHtml.esc(saved.getTitle())),
+                    keyboards.productReleasesInline());
+        } catch (Exception ex) {
+            messageSender.sendTextSafe(chatId, "❌ " + TgHtml.esc(ex.getMessage()));
+        }
+    }
+
+    private void showStory(long chatId, int messageId) {
+        var arcOpt = storyService.activeArc();
+        boolean has = arcOpt.isPresent();
+        String body;
+        if (has) {
+            body = storyService.formatPlan(arcOpt.get().getId());
+        } else {
+            body = """
+                    📖 <b>Сюжет канала</b>
+
+                    Не один пост «мы крутые», а серия из 6 эпизодов:
+                    боль админа → ясность → ритуал → ассистент → умный рост → приглашение.
+
+                    Бот составит план и тексты, потом можно:
+                    • выпустить следующий эпизод вручную
+                    • или запустить арку: 1 сейчас, остальные по одному в день в 11:00 МСК""";
+        }
+        InlineKeyboardMarkup kb = keyboards.productStoryInline(has);
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, body, kb);
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, body, kb);
+        }
+    }
+
+    private void buildStory(long chatId, int messageId, UserEntity user) {
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId,
+                    "⏳ <b>Пишу сюжетную арку…</b>\n\n6 эпизодов, связный сюжет. ~1–2 минуты.", null);
+        }
+        try {
+            var arc = storyService.createIntroArc(user.getTelegramId());
+            String plan = storyService.formatPlan(arc.getId());
+            String text = "✅ <b>План готов</b>\n\n" + plan
+                    + "\n\nДальше: опубликовать следующий эпизод или запустить всю арку.";
+            messageSender.sendTextWithInlineSafe(chatId, text, keyboards.productStoryInline(true));
+        } catch (Exception ex) {
+            messageSender.sendTextWithInlineSafe(chatId,
+                    "❌ Не удалось собрать арку: " + TgHtml.esc(ex.getMessage()),
+                    keyboards.productStoryInline(false));
+        }
+    }
+
+    private void publishStoryNext(long chatId, int messageId, UserEntity user) {
+        var arc = storyService.activeArc().orElse(null);
+        if (arc == null) {
+            messageSender.sendTextWithInlineSafe(chatId, "Сначала собери сюжетный план.",
+                    keyboards.productStoryInline(false));
+            return;
+        }
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, "⏳ Публикую следующий эпизод…", null);
+        }
+        var r = storyService.publishNext(arc.getId(), user.getTelegramId());
+        if (!r.ok()) {
+            messageSender.sendTextWithInlineSafe(chatId, "❌ " + TgHtml.esc(r.error()),
+                    keyboards.productStoryInline(true));
+            return;
+        }
+        String ok = "✅ <b>Эпизод в канале</b>\n" + TgHtml.esc(r.beat().getTitle());
+        if (r.link() != null) {
+            ok += "\n🔗 <a href=\"" + TgHtml.esc(r.link()) + "\">Открыть</a>";
+        }
+        messageSender.sendTextWithInlineSafe(chatId, ok, keyboards.productStoryInline(true));
+    }
+
+    private void startStoryArc(long chatId, int messageId, UserEntity user) {
+        var arc = storyService.activeArc().orElse(null);
+        if (arc == null) {
+            messageSender.sendTextWithInlineSafe(chatId, "Сначала собери сюжетный план.",
+                    keyboards.productStoryInline(false));
+            return;
+        }
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, "⏳ Запускаю арку…", null);
+        }
+        var r = storyService.startArcDaily(arc.getId(), user.getTelegramId());
+        if (!r.ok()) {
+            messageSender.sendTextWithInlineSafe(chatId, "❌ " + TgHtml.esc(r.error()),
+                    keyboards.productStoryInline(true));
+            return;
+        }
+        messageSender.sendTextWithInlineSafe(chatId, """
+                🎬 <b>Арка запущена</b>
+
+                Сейчас в канале: %d эпизод
+                В очереди на следующие дни (11:00 МСК): %d
+
+                Сюжет пойдёт сам — можно не вбрасывать всё за раз.""".formatted(
+                r.publishedNow(), r.scheduled()),
+                keyboards.productStoryInline(true));
+    }
+
+    private void showReleases(long chatId, int messageId) {
+        var list = releaseService.recent(12);
+        StringBuilder sb = new StringBuilder("🛠 <b>Реестр релизов</b>\n\n");
+        if (list.isEmpty()) {
+            sb.append("Пока пусто. Добавь апдейт — бот будет писать Changelog из фактов.\n");
+        } else {
+            for (ProductReleaseEntity r : list) {
+                sb.append("<b>").append(TgHtml.esc(r.getVersion())).append("</b> — ")
+                        .append(TgHtml.esc(r.getTitle()))
+                        .append(" · ").append(TgHtml.esc(r.getStatus()))
+                        .append(" · ").append(TgHtml.esc(r.getCategory()))
+                        .append('\n');
+            }
+            sb.append("\nНажми релиз ниже → готовый патчноут в превью.");
+        }
+        List<List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton>> rows =
+                new ArrayList<>();
+        List<org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton> row =
+                new ArrayList<>();
+        for (ProductReleaseEntity r : list) {
+            if (!"READY".equals(r.getStatus()) && !"DRAFT".equals(r.getStatus())) {
+                continue;
+            }
+            row.add(org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                    .text(r.getVersion())
+                    .callbackData(CallbackData.PREFIX_PRODUCT + "relpost:" + r.getId())
+                    .build());
+            if (row.size() == 3) {
+                rows.add(row);
+                row = new ArrayList<>();
+            }
+        }
+        if (!row.isEmpty()) {
+            rows.add(row);
+        }
+        rows.add(List.of(
+                org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("➕ Добавить апдейт")
+                        .callbackData(CallbackData.PRODUCT_RELEASE_ADD)
+                        .build(),
+                org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("📋 Latest READY")
+                        .callbackData(CallbackData.PRODUCT_RELEASE_LATEST)
+                        .build()
+        ));
+        rows.add(List.of(
+                org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton.builder()
+                        .text("◀️ Назад")
+                        .callbackData(CallbackData.PRODUCT_MENU)
+                        .build()
+        ));
+        InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup(rows);
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, sb.toString().trim(), keyboard);
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, sb.toString().trim(), keyboard);
+        }
+    }
+
+    private void startAddRelease(long chatId, int messageId) {
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setState(BotState.PRODUCT_RELEASE_ADD);
+        String text = """
+                ➕ <b>Новый апдейт в реестр</b>
+
+                Пришли одним сообщением:
+                <code>0.4.3 | Короткий заголовок</code>
+                <code>▪️Что сделали</code>
+                <code>▪️Что пофиксили</code>
+                <code>▪️Что тестируем</code>
+
+                Или просто список буллетов — версию проставим сами.""";
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, text, keyboards.productReleasesInline());
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, text, keyboards.productReleasesInline());
+        }
+    }
+
+    private void generateLatestChangelog(long chatId, int messageId, UserEntity user) {
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, "⏳ Собираю патчноут из реестра…", null);
+        }
+        ProductChannelPostEntity post = productChannelService.generateDraft(
+                ProductPostRubric.CHANGELOG, user.getTelegramId(), null);
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setProductPostId(post.getId());
+        session.setState(BotState.PRODUCT_PREVIEW);
+        showPreview(chatId, messageId, post.getId(), post.getDraftText());
+    }
+
+    private void generateFromRelease(long chatId, int messageId, UserEntity user, long releaseId) {
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, "⏳ Собираю патчноут…", null);
+        }
+        ProductChannelPostEntity post = productChannelService.generateChangelogFromRelease(
+                releaseId, user.getTelegramId());
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setProductPostId(post.getId());
+        session.setState(BotState.PRODUCT_PREVIEW);
+        showPreview(chatId, messageId, post.getId(), post.getDraftText());
     }
 
     private void handleSync(long chatId, int messageId) {

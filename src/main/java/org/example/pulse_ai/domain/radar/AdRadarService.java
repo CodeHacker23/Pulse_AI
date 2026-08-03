@@ -54,6 +54,52 @@ public class AdRadarService {
     }
 
     @Transactional
+    public AdPlacementEntity upsertCandidate(
+            UserEntity user,
+            Long ownerChannelId,
+            String username,
+            String title,
+            Integer subscribers,
+            Integer avgReach,
+            Integer estimatedPriceRub,
+            String matchReason
+    ) {
+        String uname = username.replace("@", "").toLowerCase(Locale.ROOT);
+        AdPlacementEntity entity = placementRepository
+                .findTop15ByUserIdOrderByLastCheckedAtDescCreatedAtDesc(user.getId()).stream()
+                .filter(p -> uname.equalsIgnoreCase(p.getTargetUsername()))
+                .findFirst()
+                .orElseGet(AdPlacementEntity::new);
+
+        entity.setUserId(user.getId());
+        entity.setOwnerChannelId(ownerChannelId);
+        entity.setTargetUsername(uname);
+        entity.setTargetTitle(title != null ? title : uname);
+        entity.setQualityVerdict("CANDIDATE");
+        entity.setQualityScore((short) 50);
+        int price = estimatedPriceRub != null ? estimatedPriceRub : estimatePostPrice(subscribers, avgReach);
+        String notes = (matchReason != null ? matchReason + ". " : "")
+                + "Оценка поста ~" + price + " ₽ (ориентир). "
+                + "Закреп: 1ч / 24ч / без — уточним у админа. "
+                + "Вам цена ≈ +" + AdDealService.COMMISSION_PERCENT + "%.";
+        entity.setQualityNotes(notes);
+        entity.setAvgViews(avgReach);
+        entity.setLastCheckedAt(Instant.now());
+        return placementRepository.save(entity);
+    }
+
+    /** Грубая оценка цены поста: от охвата или подписчиков. */
+    public static int estimatePostPrice(Integer subscribers, Integer avgReach) {
+        if (avgReach != null && avgReach > 0) {
+            return Math.max(500, Math.round(avgReach * 0.4f));
+        }
+        if (subscribers != null && subscribers > 0) {
+            return Math.max(500, subscribers / 25);
+        }
+        return 1500;
+    }
+
+    @Transactional
     public AdPlacementEntity checkAndSavePlacement(UserEntity user, Long ownerChannelId, String rawInput) {
         ParsedLink parsed = parseLink(rawInput);
         if (!USERNAME.matcher(parsed.username()).matches()) {

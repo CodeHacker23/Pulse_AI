@@ -1,0 +1,23 @@
+{
+  "accounts": [
+    {
+      "id": 1,
+      "label": "parser-1",
+      "session": "parser-1",
+      "type": "PARSER"
+    },
+    {
+      "id": 2,
+      "label": "observer-1",
+      "session": "observer-1",
+      "type": "OBSERVER"
+    },
+    {
+      "id": 3,
+      "label": "sender-1",
+      "session": "sender-1",
+      "type": "SENDER",
+      "comment": "отлежка; daily_limit 35 в scout_accounts"
+    }
+  ]
+}

@@ -32,6 +32,7 @@ public class PostsGenerationService {
             РАЗМЕТКА: только **жирный** и _курсив_. Без # и HTML.
             ДЛИНА — варьируй между постами: часть коротких (350–550), часть средних (600–900).
             Никогда не длиннее 1000 символов и не сплошным полотном.
+            Короткие посты и посты под фото — цель ≤ 920 (лимит подписи Telegram к фото — 1024 HTML).
             Используй реальные переносы строк (в JSON это \\n). НЕ пиши пост одним абзацем.
             2–5 эмодзи к месту.
             Ответ — только JSON.""";
@@ -47,6 +48,31 @@ public class PostsGenerationService {
             int postCount,
             int timeoutSeconds
     ) {
+        return generatePosts(requestId, channelTitle, ideas, metrics, postCount, timeoutSeconds, null, null);
+    }
+
+    public List<GeneratedPostEntity> generatePosts(
+            long requestId,
+            String channelTitle,
+            List<ContentIdeaEntity> ideas,
+            AnalysisMetrics metrics,
+            int postCount,
+            int timeoutSeconds,
+            String stylePrompt
+    ) {
+        return generatePosts(requestId, channelTitle, ideas, metrics, postCount, timeoutSeconds, stylePrompt, null);
+    }
+
+    public List<GeneratedPostEntity> generatePosts(
+            long requestId,
+            String channelTitle,
+            List<ContentIdeaEntity> ideas,
+            AnalysisMetrics metrics,
+            int postCount,
+            int timeoutSeconds,
+            String stylePrompt,
+            String analysisBrief
+    ) {
         List<ContentIdeaEntity> source = ideas.stream().limit(postCount).toList();
         if (source.isEmpty()) {
             return List.of();
@@ -60,7 +86,7 @@ public class PostsGenerationService {
         }
 
         try {
-            String prompt = buildBatchPrompt(channelTitle, source, metrics);
+            String prompt = buildBatchPrompt(channelTitle, source, metrics, stylePrompt, analysisBrief);
             String json = llmService.completeJsonWithTimeout(SYSTEM, prompt, timeoutSeconds);
             return parseAndSave(requestId, source, json);
         } catch (Exception ex) {
@@ -108,7 +134,13 @@ public class PostsGenerationService {
         return result;
     }
 
-    private static String buildBatchPrompt(String channelTitle, List<ContentIdeaEntity> ideas, AnalysisMetrics metrics) {
+    private static String buildBatchPrompt(
+            String channelTitle,
+            List<ContentIdeaEntity> ideas,
+            AnalysisMetrics metrics,
+            String stylePrompt,
+            String analysisBrief
+    ) {
         StringBuilder ideaBlock = new StringBuilder();
         int n = 1;
         for (ContentIdeaEntity idea : ideas) {
@@ -124,16 +156,24 @@ public class PostsGenerationService {
         }
         return """
                 Канал: %s
-                Напиши %d готовых поста для Telegram по идеям ниже (по одному посту на идею).
+                %s%sНапиши %d готовых поста для Telegram по идеям ниже (по одному посту на идею).
+                Если есть бриф разбора — закрой его просадки: крючок в первой строке, разнообразие подачи.
 
                 Идеи:
                 %s
 
-                Примеры удачных постов канала:
+                Примеры удачных постов канала (вторичный ориентир, если не противоречат стилю выше):
                 %s
 
                 JSON:
                 {"posts":[{"text":"..."}]}
-                """.formatted(channelTitle, ideas.size(), ideaBlock, samples).trim();
+                """.formatted(
+                channelTitle,
+                StylePromptBlock.format(stylePrompt),
+                AnalysisBriefForContent.promptBlock(analysisBrief),
+                ideas.size(),
+                ideaBlock,
+                samples
+        ).trim();
     }
 }

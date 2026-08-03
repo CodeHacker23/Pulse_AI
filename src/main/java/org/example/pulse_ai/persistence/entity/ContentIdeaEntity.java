@@ -40,6 +40,14 @@ public class ContentIdeaEntity {
     @Column(name = "suggested_day", length = 32)
     private String suggestedDay;
 
+    /** Какую просадку из разбора закрывает идея. */
+    @Column(name = "closes_gap", length = 256)
+    private String closesGap;
+
+    /** Короткий CTA для финала поста. */
+    @Column(length = 512)
+    private String cta;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

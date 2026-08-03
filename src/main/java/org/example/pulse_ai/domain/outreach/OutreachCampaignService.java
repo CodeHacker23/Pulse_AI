@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.pulse_ai.ai.LlmService;
 import org.example.pulse_ai.config.PulseOutreachProperties;
+import org.example.pulse_ai.domain.entitlement.AssistantQuotaService;
 import org.example.pulse_ai.persistence.entity.OutreachCampaignEntity;
 import org.example.pulse_ai.persistence.entity.OutreachMonthlyUsageEntity;
 import org.example.pulse_ai.persistence.entity.OutreachProspectEntity;
@@ -40,6 +41,7 @@ public class OutreachCampaignService {
     private final OutreachProspectRepository prospectRepository;
     private final OutreachMonthlyUsageRepository usageRepository;
     private final PulseOutreachProperties properties;
+    private final AssistantQuotaService assistantQuotaService;
     private final LlmService llmService;
 
     @Transactional(readOnly = true)
@@ -59,13 +61,13 @@ public class OutreachCampaignService {
 
     @Transactional(readOnly = true)
     public int sendsRemainingThisMonth(Long userId) {
-        String monthKey = monthKey();
-        OutreachMonthlyUsageEntity.Pk pk = new OutreachMonthlyUsageEntity.Pk();
-        pk.setUserId(userId);
-        pk.setMonthKey(monthKey);
-        return usageRepository.findById(pk)
-                .map(u -> Math.max(0, properties.getMonthlySendLimit() - u.getSentCount()))
-                .orElse(properties.getMonthlySendLimit());
+        return assistantQuotaService.dmQuota(userId).remaining();
+    }
+
+    @Transactional(readOnly = true)
+    public int monthlyDmLimit(Long userId) {
+        AssistantQuotaService.DmQuotaSnapshot snap = assistantQuotaService.dmQuota(userId);
+        return snap.base() + snap.topupRemaining();
     }
 
     @Transactional
@@ -125,7 +127,7 @@ public class OutreachCampaignService {
         }
         if (sendsRemainingThisMonth(userId) <= 0) {
             throw new IllegalStateException(
-                    "Лимит рассылок на месяц исчерпан (" + properties.getMonthlySendLimit() + " ЛС).");
+                    "Лимит рассылок на месяц исчерпан. Докупите ЛС в «💳 Тарифы» или дождитесь нового месяца.");
         }
         campaign.setStatus("RUNNING");
         if (campaign.getStartedAt() == null) {
@@ -191,12 +193,19 @@ public class OutreachCampaignService {
         if (campaign == null) {
             return false;
         }
+        AssistantQuotaService.DmQuotaSnapshot snap = assistantQuotaService.dmQuota(userId);
+        if (snap.remaining() <= 0) {
+            return false;
+        }
         prospect.setStatus("SENT");
         prospect.setSentAt(Instant.now());
         prospectRepository.save(prospect);
         campaign.setSentCount(campaign.getSentCount() + 1);
         campaignRepository.save(campaign);
         incrementMonthlyUsage(userId);
+        if (snap.used() >= snap.base()) {
+            assistantQuotaService.consumeTopupDm(userId);
+        }
         return true;
     }
 
@@ -229,11 +238,18 @@ public class OutreachCampaignService {
         String hook = "";
         try {
             hook = llmService.completeTextWithTimeout(
-                    "Сформулируй одну короткую персональную строку (≤12 слов) для первого ЛС в Telegram. "
-                            + "Без ссылок. Только текст строки.",
-                    "Шаблон: " + template + "\nПолучатель: @" + username + "\nКанал отправителя: " + channelTitle,
-                    12,
-                    120);
+                    """
+                    Ты пишешь первую строку холодного ЛС в Telegram (outreach).
+                    Цель: человек ответил, не заблокировал.
+                    Правила: ≤14 слов; конкретика под канал/нишу; без «дорогой»; без ссылок;
+                    без спам-триггеров (заработок, крипта, 100%); звучит как живой человек.
+                    Верни ТОЛЬКО одну строку-крючок.
+                    """,
+                    "Шаблон кампании: " + template
+                            + "\nПолучатель: @" + username
+                            + "\nКанал отправителя: " + channelTitle,
+                    15,
+                    80);
             hook = hook != null ? hook.trim() : "";
         } catch (Exception ex) {
             log.debug("Outreach personalize skip: {}", ex.getMessage());

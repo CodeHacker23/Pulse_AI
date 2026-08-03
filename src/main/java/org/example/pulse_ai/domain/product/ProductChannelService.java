@@ -64,6 +64,8 @@ public class ProductChannelService {
 
     private final ProductStyleLearnerService styleLearner;
 
+    private final ProductReleaseService releaseService;
+
 
 
     @Transactional
@@ -72,50 +74,51 @@ public class ProductChannelService {
 
         styleLearner.ensureFreshStyle();
 
-        String brainContext = styleLearner.buildContextForPrompt();
+        String brainContext = styleLearner.buildContextForPrompt()
+                + "\n\n" + releaseService.factsBlock(5);
 
-        String prompt = buildPrompt(rubric, brainContext, extraContext);
+        String text = null;
 
-        String text;
-
-        try {
-
-            text = llmService.completeTextWithTimeout(
-
-                    ProductChannelPrompts.SYSTEM,
-
-                    prompt,
-
-                    analysisProperties.getLlmTimeoutSeconds(),
-
-                    1500
-
-            );
-
-            text = text != null ? TextHumanizer.humanize(text.trim()) : fallback(rubric);
-
-        } catch (Exception ex) {
-
-            log.warn("Product post generation failed: {}", ex.getMessage());
-
-            text = fallback(rubric);
-
+        // Changelog из реестра — факты, не фантазия LLM
+        if (rubric == ProductPostRubric.CHANGELOG) {
+            text = releaseService.composeLatestReadyPatchNote().orElse(null);
         }
 
-
+        if (text == null) {
+            String prompt = buildPrompt(rubric, brainContext, extraContext);
+            try {
+                text = llmService.completeTextWithTimeout(
+                        ProductChannelPrompts.SYSTEM,
+                        prompt,
+                        analysisProperties.getLlmTimeoutSeconds(),
+                        1500
+                );
+                text = text != null ? TextHumanizer.humanize(text.trim()) : fallback(rubric);
+            } catch (Exception ex) {
+                log.warn("Product post generation failed: {}", ex.getMessage());
+                text = fallback(rubric);
+            }
+        }
 
         ProductChannelPostEntity post = new ProductChannelPostEntity();
-
         post.setRubric(rubric);
-
         post.setDraftText(text);
-
         post.setCreatedByTelegramId(ownerTelegramId);
-
         post.setStatus(ProductChannelPostStatus.DRAFT);
-
         return postRepository.save(post);
+    }
 
+    /** Патчноут конкретного релиза из реестра. */
+    @Transactional
+    public ProductChannelPostEntity generateChangelogFromRelease(long releaseId, long ownerTelegramId) {
+        var release = releaseService.findById(releaseId)
+                .orElseThrow(() -> new IllegalArgumentException("Релиз не найден"));
+        ProductChannelPostEntity post = new ProductChannelPostEntity();
+        post.setRubric(ProductPostRubric.CHANGELOG);
+        post.setDraftText(releaseService.composePatchNote(release));
+        post.setCreatedByTelegramId(ownerTelegramId);
+        post.setStatus(ProductChannelPostStatus.DRAFT);
+        return postRepository.save(post);
     }
 
 
@@ -236,12 +239,23 @@ public class ProductChannelService {
 
         postRepository.save(post);
 
-
+        if (post.getRubric() == ProductPostRubric.CHANGELOG) {
+            releaseService.markPostedFromPatchNote(finalText, messageId.longValue());
+        }
 
         log.info("Product channel post published: id={}, rubric={}", postId, post.getRubric());
 
-        return PublishOutcome.success(messageId, link);
+        return PublishOutcome.success(post.getId(), messageId, link);
 
+    }
+
+    /** Сохранить черновик и сразу опубликовать в канал продукта. */
+    @Transactional
+    public PublishOutcome publishDraftNow(ProductChannelPostEntity draft, String finalText) {
+        draft.setDraftText(finalText);
+        draft.setStatus(ProductChannelPostStatus.DRAFT);
+        ProductChannelPostEntity saved = postRepository.save(draft);
+        return publish(saved.getId(), finalText);
     }
 
 
@@ -328,7 +342,7 @@ public class ProductChannelService {
                 post.setFinalText(text);
                 postRepository.save(post);
                 log.info("Product channel welcome post repaired: messageId={}", post.getTelegramMessageId());
-                return PublishOutcome.success(post.getTelegramMessageId(), post.getPostLink());
+                return PublishOutcome.success(post.getId(), post.getTelegramMessageId(), post.getPostLink());
             }
         }
 
@@ -355,7 +369,7 @@ public class ProductChannelService {
         postRepository.save(post);
 
         log.info("Product channel bootstrap welcome published: messageId={}", messageId);
-        return PublishOutcome.success(messageId, post.getPostLink());
+        return PublishOutcome.success(post.getId(), messageId, post.getPostLink());
     }
 
     private String buildPrompt(ProductPostRubric rubric, String brainContext, String extraContext) {
@@ -376,14 +390,11 @@ public class ProductChannelService {
 
             case MORNING -> base + """
 
-                    Формат async «утро» (НЕ live-видео):
-
-                    • Приветствие + дата/день недели одной строкой
-
-                    • 2–3 пункта: что проверить в своём канале сегодня
-
-                    • 1 микро-идея поста на сегодня
-
+                    Формат «утро команды Pulse» (НЕ live-видео):
+                    • Одна строка: день + что сегодня в фокусе продукта
+                    • 2 пункта прогресса / тестов (конкретно: что сделали или проверяем)
+                    • 1 вопрос или микро-CTA: что полезно читателю-админу сегодня
+                    • Связь с ассистентом: лиды / план контента / реклама — по делу
                     500–750 символов.""" + cta;
 
             case PROMO -> base + """
@@ -420,9 +431,12 @@ public class ProductChannelService {
 
             case CHANGELOG -> base + """
 
-                    Одно свежее улучшение: бонусы к пакетам, разбор поста, жёсткий аудит, секции разбора.
-
-                    500–800 символов.""" + cta;
+                    Патчноут в стиле игрового апдейта:
+                    Заголовок: 🛠Обновление X.Y.Z
+                    Подзаголовок — коротко о сути для админа канала
+                    Буллеты ▪️ — только польза и интрига из ФАКТОВ.
+                    ЗАПРЕЩЕНО: схемы, роли, прокси, лимиты, названия внутренних модулей.
+                    500–1200 символов.""" + cta;
 
             case COMMUNITY -> base + """
 
@@ -433,6 +447,12 @@ public class ProductChannelService {
             case CASE -> base + """
 
                     Мини-кейс обобщённо: было/стало после разбора и идей. Без фейковых имён. 500–800 символов.""" + cta;
+
+            case FEATURE_VOTE -> base + """
+
+                    Голосование за следующую фичу Pulse Ассистента (2–3 варианта).
+                    Тон: «мы строим с вами». Без манипуляций. 400–700 символов.
+                    В конце — чёткие варианты ответа в комментариях.""" + cta;
 
         };
 
@@ -474,11 +494,11 @@ public class ProductChannelService {
 
 
 
-    public record PublishOutcome(boolean success, Integer messageId, String link, String error) {
+    public record PublishOutcome(boolean success, Long postId, Integer messageId, String link, String error) {
 
-        public static PublishOutcome success(int messageId, String link) {
+        public static PublishOutcome success(long postId, int messageId, String link) {
 
-            return new PublishOutcome(true, messageId, link, null);
+            return new PublishOutcome(true, postId, messageId, link, null);
 
         }
 
@@ -486,7 +506,7 @@ public class ProductChannelService {
 
         public static PublishOutcome failure(String error) {
 
-            return new PublishOutcome(false, null, null, error);
+            return new PublishOutcome(false, null, null, null, error);
 
         }
 

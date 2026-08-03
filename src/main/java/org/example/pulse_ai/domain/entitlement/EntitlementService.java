@@ -33,23 +33,39 @@ public class EntitlementService {
 
     @Transactional
     public UserEntitlementEntity grant(Long userId, PerkType perk, Long sourcePaymentId) {
+        return grantRaw(userId, perk.code(), perk.defaultUses(), perk.defaultDays(), sourcePaymentId);
+    }
+
+    @Transactional
+    public UserEntitlementEntity grantRaw(
+            Long userId,
+            String perkCode,
+            Integer usesRemaining,
+            Integer daysValid,
+            Long sourcePaymentId
+    ) {
         UserEntitlementEntity entity = new UserEntitlementEntity();
         entity.setUserId(userId);
-        entity.setPerkCode(perk.code());
-        entity.setUsesRemaining(perk.defaultUses());
+        entity.setPerkCode(perkCode);
+        entity.setUsesRemaining(usesRemaining);
         entity.setSourcePaymentId(sourcePaymentId);
-        if (perk.defaultDays() != null) {
-            entity.setExpiresAt(Instant.now().plus(perk.defaultDays(), ChronoUnit.DAYS));
+        if (daysValid != null) {
+            entity.setExpiresAt(Instant.now().plus(daysValid, ChronoUnit.DAYS));
         }
         return entitlementRepository.save(entity);
     }
 
     @Transactional
     public boolean tryConsume(Long userId, PerkType perk) {
+        return tryConsumeRaw(userId, perk.code());
+    }
+
+    @Transactional
+    public boolean tryConsumeRaw(Long userId, String perkCode) {
         if (!billingProperties.isEnabled()) {
             return true;
         }
-        List<UserEntitlementEntity> active = findActive(userId, perk);
+        List<UserEntitlementEntity> active = entitlementRepository.findActive(userId, perkCode, Instant.now());
         if (active.isEmpty()) {
             return false;
         }

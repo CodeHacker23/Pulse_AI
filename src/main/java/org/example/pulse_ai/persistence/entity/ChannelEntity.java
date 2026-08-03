@@ -75,6 +75,10 @@ public class ChannelEntity {
     @Column(name = "sales_objections", columnDefinition = "TEXT")
     private String salesObjections;
 
+    /** Пользовательский промпт стиля постов — приоритетнее примеров с канала. */
+    @Column(name = "content_style_prompt", columnDefinition = "TEXT")
+    private String contentStylePrompt;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

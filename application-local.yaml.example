@@ -34,3 +34,21 @@ telegram:
 pulse:
   ai:
     api-key: sk-your-proxyapi-key
+  outreach:
+    # true = реальная отправка ЛС через scout sidecar (нужен SENDER + sidecar-url)
+    dispatch-enabled: true
+    monthly-send-limit: 100
+  scout:
+    enabled: true
+    sidecar-url: http://127.0.0.1:8090
+    admin-telegram-ids: []   # ваш Telegram user id для Scout status
+  admin:
+    web-enabled: true
+    web-token: pulse-local-admin   # http://127.0.0.1:8081/admin?token=...
+  external:
+    # Токен с https://api.tgstat.ru (тариф API Stat — для search/постов/статы).
+    # Без token: анализ на скрейпе t.me (бесплатный слой).
+    # tgstat-token: "YOUR_TGSTAT_TOKEN"
+    tgstat-timeout-ms: 8000
+    # true = TGStat только CONTENT+ при billing.enabled; локалка с billing=false — всегда ON
+    tgstat-paid-only: true

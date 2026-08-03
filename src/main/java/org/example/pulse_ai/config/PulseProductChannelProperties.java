@@ -41,9 +41,17 @@ public class PulseProductChannelProperties {
     private boolean bootstrapWelcomeOnStart = true;
 
     public boolean isOwner(long telegramUserId) {
-        if (!ownerTelegramIds.isEmpty()) {
-            return ownerTelegramIds.contains(telegramUserId);
+        if (ownerTelegramIds != null) {
+            for (Long id : ownerTelegramIds) {
+                if (id != null && id == telegramUserId) {
+                    return true;
+                }
+            }
+            // Список задан, но ID не совпал — для локалки можно открыть всем
+            if (!ownerTelegramIds.isEmpty() && !devOpenAccess) {
+                return false;
+            }
         }
-        return devOpenAccess;
+        return devOpenAccess || ownerTelegramIds == null || ownerTelegramIds.isEmpty();
     }
 }

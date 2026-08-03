@@ -126,6 +126,55 @@ public class TgstatApiClient {
     }
 
     /**
+     * Поиск каналов по строке (ниша / название / ключ). Не требует S+ category-only.
+     * Пусто, если API выключен или квота/ошибка.
+     */
+    public List<NicheComparison.Peer> searchPeers(String query, String excludeUsername, int limit) {
+        if (!isEnabled() || query == null || query.isBlank()) {
+            return List.of();
+        }
+        String me = ExternalScrapeSupport.normalizeUsername(excludeUsername);
+        String q = query.trim();
+        if (q.length() > 80) {
+            q = q.substring(0, 80);
+        }
+        try {
+            JsonNode r = callOk("/channels/search",
+                    "q=" + enc(q) + "&country=" + enc("Россия") + "&limit=" + Math.min(Math.max(limit, 5), 50));
+            if (r == null) {
+                // fallback: иногда ниша передаётся как category
+                r = callOk("/channels/search",
+                        "category=" + enc(q) + "&country=" + enc("Россия") + "&limit=" + Math.min(Math.max(limit, 5), 50));
+            }
+            if (r == null) {
+                return List.of();
+            }
+            List<NicheComparison.Peer> peers = new ArrayList<>();
+            for (JsonNode item : r.path("items")) {
+                if (!"channel".equals(item.path("peer_type").asText())) {
+                    continue;
+                }
+                String uname = item.path("username").asText("").replace("@", "");
+                if (uname.isBlank() || uname.equalsIgnoreCase(me)) {
+                    continue;
+                }
+                Integer s = intOrNull(item, "participants_count");
+                peers.add(new NicheComparison.Peer(
+                        item.path("title").asText(uname),
+                        uname,
+                        s != null ? s : 0));
+                if (peers.size() >= limit) {
+                    break;
+                }
+            }
+            return peers;
+        } catch (Exception ex) {
+            log.warn("TGStat peer search failed для «{}»: {}", q, ex.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
      * Сравнение канала с нишей по категории: медианы подписчиков/ИЦ и топ похожих каналов.
      * Требует тариф S+ (иначе просто вернёт пусто).
      */

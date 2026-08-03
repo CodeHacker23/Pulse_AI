@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pulse — Админ-консоль</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/admin/admin.css" />
+</head>
+<body>
+  <div id="login-screen" class="login-screen hidden">
+    <div class="login-panel anim-in">
+      <p class="brand-mark">Pulse</p>
+      <h1>Админ-консоль</h1>
+      <p class="muted">Токен из конфига <code>pulse.admin.web-token</code></p>
+      <p class="hint" style="margin:8px 0 0">Локально по умолчанию: <code>pulse-local-admin</code></p>
+      <form id="login-form">
+        <input id="token-input" type="password" autocomplete="current-password" placeholder="pulse-local-admin" value="pulse-local-admin" />
+        <button type="submit" class="btn btn-primary">Войти</button>
+      </form>
+      <p id="login-error" class="error hidden"></p>
+    </div>
+  </div>
+
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-mark">Pulse</span>
+        <span class="brand-sub">Админ-консоль</span>
+      </div>
+      <nav class="nav" id="nav">
+        <button type="button" data-view="dashboard" class="nav-item active">Обзор</button>
+        <button type="button" data-view="proxies" class="nav-item">Прокси</button>
+        <button type="button" data-view="accounts" class="nav-item">Скауты</button>
+        <button type="button" data-view="inbox" class="nav-item">Кабинет TG</button>
+        <button type="button" data-view="audience" class="nav-item">ЦА / join</button>
+        <button type="button" data-view="campaigns" class="nav-item">Рассылки</button>
+        <button type="button" data-view="templates" class="nav-item">Шаблоны ЛС</button>
+        <button type="button" data-view="logs" class="nav-item">Журнал</button>
+        <button type="button" data-view="radar" class="nav-item">Радар</button>
+      </nav>
+      <div class="sidebar-foot">
+        <button type="button" id="logout-btn" class="btn btn-ghost">Выйти</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="view-title" class="anim-title">Обзор</h1>
+          <p id="view-sub" class="muted">Живой статус бота и скаутов</p>
+        </div>
+        <div class="topbar-actions">
+          <button type="button" id="refresh-btn" class="btn btn-ghost">Обновить</button>
+          <span id="toast" class="toast hidden"></span>
+        </div>
+      </header>
+
+      <section id="view-dashboard" class="view anim-view">
+        <div class="grid stats" id="dash-stats"></div>
+        <div class="grid two">
+          <div class="panel">
+            <div class="panel-head"><h2>Скаут-аккаунты</h2></div>
+            <div id="dash-accounts" class="table-wrap"></div>
+          </div>
+          <div class="panel tip-panel">
+            <h2>Что смотреть сейчас</h2>
+            <ul class="tips" id="dash-tips">
+              <li>Sidecar оффлайн → прокси и ЛС не работают.</li>
+              <li>Нет SENDER → рассылки в паузе.</li>
+              <li>FLOOD/BAN → SpamBot + смена прокси (автоматизируем дальше).</li>
+              <li>Живые диалоги — <b>Кабинет TG</b> (слева чаты, справа переписка).</li>
+              <li>Массовый join списком — вкладка <b>ЦА / join</b>.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-proxies" class="view hidden anim-view">
+        <div class="panel tip-panel">
+          <h2>Важно про прокси</h2>
+          <ul class="tips">
+            <li><b>Не крути прокси каждый день</b> — у каждого скаута свой постоянный IP. Меняем только при FLOOD/бане.</li>
+            <li>«Проверить живые» — смотрит, отвечает ли порт. Это не 100% «ТГ не спалит», но отсекает дохлые.</li>
+            <li>Оба формата ок: <code>ip:port:логин:пароль</code> и <code>логин:пароль@ip:port</code></li>
+          </ul>
+        </div>
+        <div class="grid two">
+          <div class="panel drop-zone" id="proxy-drop">
+            <div class="panel-head">
+              <h2>Загрузить сюда</h2>
+              <span class="chip">.txt / вставка</span>
+            </div>
+            <p class="muted">Перетащи файл с прокси или вставь список ниже — всё прямо в админке, никуда на диск лазить не надо.</p>
+            <textarea id="proxy-text" rows="10" placeholder="188.190.x.x:15308:user:pass&#10;user:pass@188.190.x.x:15309"></textarea>
+            <div class="row gap">
+              <button type="button" id="import-text-btn" class="btn btn-primary">Залить в пул</button>
+              <button type="button" id="proxy-file-btn" class="btn btn-secondary">Выбрать .txt</button>
+              <input type="file" id="proxy-file" accept=".txt,text/plain,.csv" class="sr-only" />
+              <button type="button" id="check-proxies-btn" class="btn btn-secondary">Проверить живые</button>
+              <button type="button" id="purge-proxies-btn" class="btn btn-ghost">Убрать мёртвые</button>
+            </div>
+            <p id="proxy-import-hint" class="muted" style="margin-top:10px"></p>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Авто-inbox (опционально)</h2>
+              <span class="chip">фон</span>
+            </div>
+            <p class="muted">Если хочешь — сохраняй список в этот файл, бот подхватит сам (~15 сек). Не обязательно: загрузка выше проще.</p>
+            <code class="path" id="proxy-inbox-path">data/proxies-inbox.txt</code>
+            <button type="button" id="pull-inbox-btn" class="btn btn-ghost">Подхватить inbox сейчас</button>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Пул прокси</h2>
+            <span id="proxy-count" class="chip">0</span>
+          </div>
+          <div id="proxy-list" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <section id="view-accounts" class="view hidden anim-view">
+        <div class="panel tip-panel">
+          <h2>Роли</h2>
+          <ul class="tips">
+            <li><b>PARSER / OBSERVER</b> — ID <code>1–99</code> (короткие). Смотрят/парсят, ЛС не шлют. Если >99 → <code>1000+</code>.</li>
+            <li><b>SENDER / OUTREACH</b> — ID <code>100–999</code> (длинные). Только ЛС. Если >999 → <code>2000+</code>. Старый #33 ок.</li>
+            <li><b>ACTIVE в БД ≠ в сети в Telegram.</b> Старт не даст, пока нет сессии. Смотри бейдж «TG в сети / TG нет».</li>
+            <li>Карточка ≠ живой аккаунт. После создания: сессия → прокси → «Старт».</li>
+          </ul>
+        </div>
+        <div class="accounts-layout">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Скауты</h2>
+              <div class="row gap">
+                <select id="accounts-life-filter" class="chip-select" title="Живые / сгоревшие">
+                  <option value="alive">Рабочие</option>
+                  <option value="burned">Сгоревшие</option>
+                  <option value="">Все</option>
+                </select>
+                <select id="accounts-role-filter" class="chip-select">
+                  <option value="">Все роли</option>
+                  <option value="SENDER">SENDER</option>
+                  <option value="OUTREACH">OUTREACH</option>
+                  <option value="PARSER">PARSER</option>
+                  <option value="OBSERVER">OBSERVER</option>
+                </select>
+              </div>
+            </div>
+            <p id="accounts-count-hint" class="muted" style="margin:0 0 10px"></p>
+            <div id="key-audit" class="key-audit hidden"></div>
+            <div id="accounts-table" class="table-wrap"></div>
+          </div>
+          <div class="stack gap">
+            <div class="panel" id="add-scout-panel">
+              <div class="panel-head"><h2>Добавить скаута</h2></div>
+              <form id="add-scout-form" class="stack">
+                <label>Роль
+                  <select name="accountType" required>
+                    <option value="SENDER">SENDER — пишет ЛС</option>
+                    <option value="OUTREACH">OUTREACH — пишет ЛС</option>
+                    <option value="PARSER">PARSER — парсит</option>
+                    <option value="OBSERVER">OBSERVER — смотрит</option>
+                  </select>
+                </label>
+                <label>Имя в админке (label)
+                  <input name="label" required placeholder="sender-1" />
+                </label>
+                <label>Лимит ЛС/день (для SENDER)
+                  <input name="dailyLimit" type="number" value="35" min="1" max="40" />
+                </label>
+                <button type="submit" class="btn btn-primary">Создать карточку</button>
+              </form>
+              <p id="add-scout-hint" class="muted" style="margin-top:10px"></p>
+            </div>
+            <div class="panel" id="connect-panel">
+              <div class="panel-head"><h2>Сессия скаута</h2></div>
+              <p id="connect-hint" class="muted">Выбери скаута → «Открыть».</p>
+              <div id="login-badge" class="login-badge muted">Не выбран</div>
+              <div id="connect-body" class="stack hidden">
+                <p id="connect-status" class="mono-block" style="white-space:pre-wrap;max-height:100px;overflow:auto"></p>
+                <div id="identity-card" class="identity-card muted">Данные покупки появятся после открытия скаута</div>
+                <form id="identity-form" class="stack identity-form hidden">
+                  <label>Телефон (как в магазине)
+                    <input name="phone" placeholder="4207..." />
+                  </label>
+                  <label>User ID
+                    <input name="userId" type="number" placeholder="8678..." />
+                  </label>
+                  <label>DC ID
+                    <input name="dcId" type="number" min="1" max="5" placeholder="4" />
+                  </label>
+                  <label>Заметка (заказ / lolz)
+                    <input name="shopNote" placeholder="observer · покупка #..." />
+                  </label>
+                  <button type="submit" class="btn btn-secondary btn-sm">Сохранить данные акка</button>
+                </form>
+                <div class="row gap wrap" id="scout-actions">
+                  <button type="button" class="btn btn-secondary" id="btn-test-login">Проверить вход</button>
+                  <button type="button" class="btn btn-primary" id="btn-start-scout" disabled>Запустить (ACTIVE)</button>
+                  <button type="button" class="btn btn-secondary" id="btn-pause-scout">Пауза</button>
+                  <button type="button" class="btn btn-primary" id="btn-open-tg" disabled>Открыть кабинет TG</button>
+                  <button type="button" class="btn btn-secondary" id="btn-restore-secrets">Восстановить из secrets</button>
+                </div>
+                <label class="btn btn-secondary file-btn">
+                  Загрузить tdata.zip
+                  <input type="file" id="tdata-file" accept=".zip,application/zip" hidden />
+                </label>
+                <label class="btn btn-secondary file-btn">
+                  Загрузить .session
+                  <input type="file" id="session-file" accept=".session" hidden />
+                </label>
+                <form id="auth-key-form" class="stack">
+                  <label>auth_key_hex (512 hex)
+                    <textarea name="authKeyHex" rows="2" placeholder="a1b2c3…" required></textarea>
+                  </label>
+                  <label>dc_id
+                    <input name="dcId" type="number" value="2" min="1" max="5" />
+                  </label>
+                  <button type="submit" class="btn btn-primary">Импорт auth_key</button>
+                </form>
+                <p class="muted" style="font-size:0.85rem">
+                  После успешного входа: зелёный бейдж «В сети» → <b>Запустить</b> → <b>Открыть Telegram</b> (чаты/группы).
+                  Папку tdata в пикере не открывай — только zip. Телефон / User ID / DC сохраняются в карточке даже без сессии.
+                </p>
+              </div>
+            </div>
+            <div class="panel tg-preview" id="profile-panel">
+              <div class="panel-head"><h2>Профиль в Telegram</h2></div>
+              <div id="tg-card" class="tg-card muted">Сначала подключи сессию</div>
+              <form id="profile-form" class="stack hidden" style="margin-top:14px">
+                <input type="hidden" name="accountId" />
+                <label>Имя <input name="firstName" /></label>
+                <label>Фамилия <input name="lastName" /></label>
+                <label>Юзернейм (без @) <input name="username" /></label>
+                <label>О себе <textarea name="about" rows="2"></textarea></label>
+                <div class="row gap">
+                  <button type="submit" class="btn btn-primary">Сохранить профиль в TG</button>
+                  <button type="button" id="photo-btn" class="btn btn-secondary">Поставить фото</button>
+                  <input type="file" id="profile-photo" accept="image/*" class="sr-only" />
+                </div>
+              </form>
+              <pre id="profile-me" class="mono-block"></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+            <section id="view-inbox" class="view hidden anim-view">
+        <div class="tg-toolbar">
+          <div>
+            <h2 class="tg-toolbar-title">Переписка</h2>
+            <p class="muted" style="margin:0">Слева — чаты выбранного скаута. Справа — диалог как в Telegram.</p>
+          </div>
+          <div class="row gap">
+            <select id="inbox-account" class="tg-account-select"></select>
+            <button type="button" id="inbox-load" class="btn btn-secondary">Обновить</button>
+          </div>
+        </div>
+        <div class="tg-cabinet tg-skin">
+          <aside class="tg-side">
+            <div class="tg-side-top">
+              <input id="dialog-filter" class="tg-search" placeholder="Поиск" />
+              <div class="kind-tabs" id="kind-tabs">
+                <button type="button" class="kind-tab active" data-kind="all">Все</button>
+                <button type="button" class="kind-tab" data-kind="user">ЛС</button>
+                <button type="button" class="kind-tab" data-kind="group">Группы</button>
+                <button type="button" class="kind-tab" data-kind="channel">Каналы</button>
+              </div>
+            </div>
+            <div id="dialogs-list" class="dialogs-list"></div>
+            <div class="tg-side-foot">
+              <input id="resolve-query" class="tg-search" placeholder="@user / t.me/..." />
+              <div class="row gap">
+                <button type="button" id="resolve-btn" class="btn btn-sm btn-secondary">Открыть</button>
+                <button type="button" id="join-btn" class="btn btn-sm btn-secondary">Join</button>
+              </div>
+            </div>
+          </aside>
+          <section class="tg-main">
+            <header class="tg-chat-head">
+              <div class="tg-chat-head-text">
+                <h2 id="chat-title">Выбери чат</h2>
+                <p id="chat-sub" class="tg-chat-sub">аккаунт скаута</p>
+              </div>
+              <button type="button" id="mark-read-btn" class="btn btn-sm tg-read-btn" disabled>Прочитано</button>
+            </header>
+            <div id="chat-messages" class="chat-messages tg-messages">
+              <div class="tg-empty">Выбери диалог слева — откроется переписка скаута</div>
+            </div>
+            <div id="mark-read-banner" class="tg-read-banner hidden">
+              <button type="button" id="mark-read-banner-btn" class="btn btn-primary">Отметить прочитанными</button>
+            </div>
+            <form id="reply-form" class="tg-composer hidden">
+              <textarea id="reply-text" rows="1" placeholder="Написать сообщение"></textarea>
+              <button type="submit" class="tg-send" title="Отправить">&#10148;</button>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-audience" class="view hidden anim-view">
+        <div class="panel tip-panel">
+          <h2>Join списком + парсинг ЦА</h2>
+          <p class="muted">Ссылки попадают в <b>общий пул</b> — не привязаны к одному акку. Join идёт сам, ~1 группа / 30 сек. Сгорел скаут → новый забирает очередь кнопкой «В пул групп».</p>
+          <p id="chat-pool-stats" class="muted" style="margin:8px 0 0"></p>
+        </div>
+        <div class="grid two">
+          <div class="panel">
+            <div class="panel-head"><h2>1. В пул (не join сразу)</h2></div>
+            <label>PARSER/OBSERVER (опционально — иначе всем живым)
+              <select id="chat-import-account"></select>
+            </label>
+            <textarea id="chat-import-text" rows="8" placeholder="t.me/group&#10;@channel&#10;https://t.me/+invite…"></textarea>
+            <div class="row gap" style="margin-top:12px">
+              <button type="button" id="chat-import-btn" class="btn btn-primary">В пул + очередь</button>
+              <button type="button" id="chat-pool-refresh" class="btn btn-secondary">Статус пула</button>
+              <label class="btn btn-secondary file-btn">
+                Загрузить .txt
+                <input type="file" id="chat-import-file" accept=".txt,text/plain" hidden />
+              </label>
+            </div>
+            <pre id="chat-import-result" class="mono-block" style="margin-top:12px"></pre>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>2. Парсинг ЦА</h2></div>
+            <form id="audience-form" class="stack">
+              <label>Парсер-аккаунт
+                <select id="audience-account" name="accountId"></select>
+              </label>
+              <label>Ссылка на чат / канал
+                <input name="link" placeholder="https://t.me/… или @channel" required />
+              </label>
+              <div class="row gap">
+                <label>Лимит <input name="limit" type="number" value="300" min="20" max="500" style="width:100px" /></label>
+                <label>Мин. балл <input name="minScore" type="number" value="35" min="0" max="100" style="width:100px" /></label>
+              </div>
+              <button type="submit" class="btn btn-primary">Проанализировать</button>
+            </form>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Результат ЦА</h2>
+            <span id="audience-count" class="chip">0</span>
+          </div>
+          <div id="audience-list" class="table-wrap"><p class="muted">Пока пусто</p></div>
+        </div>
+      </section>
+
+      <section id="view-campaigns" class="view hidden anim-view">
+        <div class="panel">
+          <div class="panel-head"><h2>Кампании рассылки</h2></div>
+          <div id="campaigns-table" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <section id="view-templates" class="view hidden anim-view">
+        <div class="grid two">
+          <div class="panel">
+            <div class="panel-head"><h2>Новый шаблон</h2></div>
+            <form id="template-form" class="stack">
+              <label>Сценарий
+                <select name="scenario">
+                  <option value="INVITE">Приглашение</option>
+                  <option value="FOLLOWUP">Дожим</option>
+                  <option value="WARM">Прогрев</option>
+                </select>
+              </label>
+              <label>Название <input name="name" value="custom" required /></label>
+              <label>Текст
+                <textarea name="body" rows="6" placeholder="{username}, видел ваш канал {channel}…" required></textarea>
+              </label>
+              <p class="hint">Переменные: {username} {channel} {topic}</p>
+              <button type="submit" class="btn btn-primary">Сохранить</button>
+            </form>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Уже есть</h2></div>
+            <div id="templates-list" class="stack"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-logs" class="view hidden anim-view">
+        <div class="panel">
+          <div class="panel-head"><h2>Журнал действий скаутов</h2></div>
+          <div id="logs-table" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <section id="view-radar" class="view hidden anim-view">
+        <div class="grid two">
+          <div class="panel">
+            <div class="panel-head"><h2>Наблюдения</h2></div>
+            <div id="radar-watches" class="table-wrap"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Свежие хиты</h2></div>
+            <div id="radar-hits" class="table-wrap"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/admin/admin.js"></script>
+</body>
+</html>

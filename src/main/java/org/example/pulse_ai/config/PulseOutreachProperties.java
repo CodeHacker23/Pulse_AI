@@ -15,8 +15,8 @@ public class PulseOutreachProperties {
     /** Лимит исходящих ЛС в месяц на пользователя (тариф Ассистент). */
     private int monthlySendLimit = 100;
 
-    /** Макс. новых ЛС в сутки на кампанию. */
-    private int defaultDailyLimit = 15;
+    /** Макс. новых ЛС в сутки на кампанию (sender-акки обычно 30–40). */
+    private int defaultDailyLimit = 35;
 
     /** Пауза между отправками (сек) при dispatchEnabled. */
     private int minDelaySeconds = 45;

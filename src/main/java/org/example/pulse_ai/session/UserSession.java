@@ -20,6 +20,10 @@ public class UserSession {
     private Long pendingLeadId;
     /** Последний завершённый разбор — чтобы из меню сразу идти к идеям/постам без повторного анализа. */
     private Long lastRequestId;
+    /** Перенос уже запланированной публикации (sched:retime). */
+    private Long scheduledPostId;
+    /** Ввод цены админа по сделке рекламы. */
+    private Long adDealId;
     private int freeDraftsUsed;
     private final java.util.HashSet<Long> draftedIdeaIds = new java.util.HashSet<>();
     private final java.util.HashMap<Long, Integer> ideasRegensByRequest = new java.util.HashMap<>();
@@ -44,6 +48,8 @@ public class UserSession {
         outreachScenario = null;
         outreachSourceDraft = null;
         outreachCampaignId = null;
+        scheduledPostId = null;
+        adDealId = null;
     }
 
     public void clearProductFlow() {

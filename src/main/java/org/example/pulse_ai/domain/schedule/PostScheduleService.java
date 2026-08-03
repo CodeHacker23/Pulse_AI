@@ -69,6 +69,18 @@ public class PostScheduleService {
     }
 
     @Transactional
+    public boolean reschedule(long id, long userId, Instant when) {
+        return repository.findById(id)
+                .filter(e -> e.getUserId().equals(userId) && e.getStatus() == ScheduledPostStatus.PENDING)
+                .map(e -> {
+                    e.setScheduledAt(when);
+                    repository.save(e);
+                    return true;
+                })
+                .orElse(false);
+    }
+
+    @Transactional
     public boolean cancel(long id, long userId) {
         return repository.findById(id)
                 .filter(e -> e.getUserId().equals(userId) && e.getStatus() == ScheduledPostStatus.PENDING)

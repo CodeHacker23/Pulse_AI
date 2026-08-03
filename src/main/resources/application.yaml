@@ -59,6 +59,7 @@ pulse:
   external:
     tgstat-token: ${TGSTAT_TOKEN:}
     tgstat-timeout-ms: 8000
+    tgstat-paid-only: true
   ai:
     provider: proxyapi-openai
     model: gpt-4o
@@ -99,6 +100,9 @@ pulse:
       - прайс
       - размещени
       - price
+  admin:
+    web-enabled: true
+    web-token: ${PULSE_ADMIN_TOKEN:pulse-local-admin}
 
 management:
   endpoints:

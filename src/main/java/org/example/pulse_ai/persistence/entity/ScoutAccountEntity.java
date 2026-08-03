@@ -2,8 +2,6 @@ package org.example.pulse_ai.persistence.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
@@ -18,8 +16,9 @@ import java.time.Instant;
 @Table(name = "scout_accounts")
 public class ScoutAccountEntity {
 
+    /** Ручной ID: watch 1–99, send 100–999 (см. ScoutAccountService). */
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Column(nullable = false)
     private Long id;
 
     @Column(nullable = false, length = 64)
@@ -45,6 +44,13 @@ public class ScoutAccountEntity {
 
     @Column(name = "last_error", length = 512)
     private String lastError;
+
+    /** Сколько раз сегодня писали /start @SpamBot (только SENDER/OUTREACH). */
+    @Column(name = "spambot_today", nullable = false)
+    private int spambotToday = 0;
+
+    @Column(name = "last_spambot_at")
+    private Instant lastSpambotAt;
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

@@ -3,6 +3,10 @@ package org.example.pulse_ai.handler;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.pulse_ai.config.PulseBillingProperties;
+import org.example.pulse_ai.domain.entitlement.AssistantQuotaService;
+import org.example.pulse_ai.domain.entitlement.EntitlementService;
+import org.example.pulse_ai.domain.entitlement.PerkType;
+import org.example.pulse_ai.domain.payment.PackageKind;
 import org.example.pulse_ai.domain.payment.PaymentService;
 import org.example.pulse_ai.keyboard.KeyboardFactory;
 import org.example.pulse_ai.persistence.entity.PackageEntity;
@@ -12,7 +16,6 @@ import org.example.pulse_ai.persistence.repository.PackageRepository;
 import org.example.pulse_ai.persistence.repository.UserRepository;
 import org.example.pulse_ai.telegram.TelegramMessageSender;
 import org.example.pulse_ai.text.SalesCopy;
-import org.example.pulse_ai.text.TgHtml;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.meta.api.objects.payments.SuccessfulPayment;
 
@@ -30,13 +33,19 @@ public class PaymentHandler {
     private final PaymentService paymentService;
     private final UserRepository userRepository;
     private final PerkHandler perkHandler;
+    private final EntitlementService entitlementService;
+    private final AssistantQuotaService assistantQuotaService;
 
     public void showPackages(long chatId) {
+        showPackages(chatId, null);
+    }
+
+    public void showPackages(long chatId, UserEntity user) {
         if (!billingProperties.isEnabled()) {
             messageSender.sendText(chatId, """
                     🧪 <b>Режим тестирования</b>
 
-                    Сейчас всё открыто — разборы, идеи, бонусы.
+                    Сейчас всё открыто — разборы, идеи, ассистент.
                     Оплата включится, когда будем готовы к запуску.""");
             return;
         }
@@ -45,10 +54,24 @@ public class PaymentHandler {
             messageSender.sendText(chatId, "Пакеты временно недоступны.");
             return;
         }
+        boolean subscribed = user != null && entitlementService.hasAccess(user.getId(), PerkType.MANAGER);
+        AssistantQuotaService.DmQuotaSnapshot dm = user != null
+                ? assistantQuotaService.dmQuota(user.getId())
+                : null;
+        StringBuilder text = new StringBuilder(SalesCopy.catalogIntro(subscribed, dm));
+        text.append("\n\n");
+        for (PackageEntity pack : packages) {
+            PackageKind kind = PackageKind.from(pack.getKind());
+            if (kind == PackageKind.LS_TOPUP && !subscribed) {
+                continue;
+            }
+            boolean highlight = "CONTENT".equals(pack.getCode()) || "ASSIST_PLUS".equals(pack.getCode());
+            text.append(SalesCopy.packageLine(pack, highlight)).append("\n\n");
+        }
         messageSender.sendTextWithInline(
                 chatId,
-                buildPackagesText(packages),
-                keyboards.paymentPackagesInline(packages)
+                text.toString().trim(),
+                keyboards.paymentCatalogInline(packages, subscribed)
         );
     }
 
@@ -63,8 +86,23 @@ public class PaymentHandler {
             messageSender.sendText(chatId, "❌ Пакет не найден.");
             return;
         }
+        PackageKind kind = PackageKind.from(pack.getKind());
+        if (kind == PackageKind.LS_TOPUP && !entitlementService.hasAccess(user.getId(), PerkType.MANAGER)) {
+            messageSender.sendTextWithInline(chatId,
+                    "🔒 Допы ЛС — только при активной подписке Pulse Ассистент.\n\n"
+                            + "Сначала оформите тариф 3990 / 6990 / 9990 ₽.",
+                    keyboards.paymentCatalogInline(
+                            packageRepository.findByActiveTrueOrderBySortOrderAsc(), false));
+            return;
+        }
 
-        PaymentEntity payment = paymentService.createStarsPayment(user, packageId);
+        PaymentEntity payment;
+        try {
+            payment = paymentService.createStarsPayment(user, packageId);
+        } catch (IllegalStateException | IllegalArgumentException ex) {
+            messageSender.sendText(chatId, "❌ " + ex.getMessage());
+            return;
+        }
         String payload = PaymentService.payloadFor(payment.getId());
         String title = "Pulse AI — " + pack.getName();
         String description = SalesCopy.invoiceDescription(pack);
@@ -99,6 +137,27 @@ public class PaymentHandler {
                 completed -> {
                     PackageEntity pack = packageRepository.findById(completed.getPackageId()).orElse(null);
                     String packName = pack != null ? pack.getName() : "пакет";
+                    PackageKind kind = pack != null ? PackageKind.from(pack.getKind()) : PackageKind.ANALYSIS;
+
+                    if (kind == PackageKind.ASSISTANT) {
+                        AssistantQuotaService.DmQuotaSnapshot dm = assistantQuotaService.dmQuota(user.getId());
+                        messageSender.sendTextWithInline(
+                                user.getTelegramId(),
+                                SalesCopy.assistantPaymentSuccess(packName, dm),
+                                keyboards.agentBackInline()
+                        );
+                        return;
+                    }
+                    if (kind == PackageKind.LS_TOPUP) {
+                        AssistantQuotaService.DmQuotaSnapshot dm = assistantQuotaService.dmQuota(user.getId());
+                        messageSender.sendTextWithInline(
+                                user.getTelegramId(),
+                                SalesCopy.lsTopupSuccess(packName, pack != null ? pack.getDmQuota() : 0, dm),
+                                keyboards.agentBackInline()
+                        );
+                        return;
+                    }
+
                     int credited = completed.getRequestsCredited() != null ? completed.getRequestsCredited() : 0;
                     int balance = userRepository.findById(user.getId()).map(UserEntity::getBalance).orElse(0);
 
@@ -123,17 +182,6 @@ public class PaymentHandler {
                         "❌ Не удалось зачислить оплату. Напишите в поддержку с чеком из Telegram."
                 )
         );
-    }
-
-    private static String buildPackagesText(List<PackageEntity> packages) {
-        StringBuilder sb = new StringBuilder(SalesCopy.packagesIntro());
-        sb.append("\n\n");
-        for (PackageEntity pack : packages) {
-            boolean highlight = "CONTENT".equals(pack.getCode());
-            sb.append(SalesCopy.packageLine(pack, highlight)).append("\n\n");
-        }
-        sb.append("<i>⭐ «Оптимал» — самый частый выбор: баланс цены и бонусов.</i>");
-        return sb.toString().trim();
     }
 
     private static short parsePackageId(String callbackData) {

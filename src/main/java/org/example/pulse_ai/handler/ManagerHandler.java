@@ -2,6 +2,7 @@ package org.example.pulse_ai.handler;
 
 import lombok.RequiredArgsConstructor;
 import org.example.pulse_ai.domain.channel.DiscussionLinkService;
+import org.example.pulse_ai.domain.entitlement.AssistantQuotaService;
 import org.example.pulse_ai.domain.entitlement.EntitlementService;
 import org.example.pulse_ai.domain.entitlement.PerkType;
 import org.example.pulse_ai.domain.lead.LeadStatus;
@@ -43,12 +44,14 @@ public class ManagerHandler {
     private final ChannelRepository channelRepository;
     private final HotLeadRepository hotLeadRepository;
     private final EntitlementService entitlementService;
+    private final AssistantQuotaService assistantQuotaService;
     private final SalesLearningService salesLearningService;
     private final DiscussionLinkService discussionLinkService;
     private final TelegramMessageSender messageSender;
     private final UserSessionService sessionService;
     private final KeyboardFactory keyboards;
     private final AdRadarHandler adRadarHandler;
+    private final AdDealHandler adDealHandler;
     private final OutreachHandler outreachHandler;
     private final ScoutAdminHandler scoutAdminHandler;
 
@@ -56,10 +59,21 @@ public class ManagerHandler {
         showAgent(chatId, 0, user);
     }
 
+    /** Хаб роста с главного меню — без скаутов в UI для обычных пользователей. */
+    public void openGrowth(long chatId, UserEntity user) {
+        showGrowthHub(chatId, 0, user);
+    }
+
     public void handle(long chatId, int messageId, String callbackQueryId, UserEntity user, String callbackData) {
         messageSender.answerCallback(callbackQueryId);
         if (callbackData.equals(CallbackData.AGENT_TOGGLE)) {
             toggle(chatId, messageId, user);
+        } else if (callbackData.equals(CallbackData.AGENT_SALES)) {
+            showSalesHub(chatId, messageId, user);
+        } else if (callbackData.equals(CallbackData.AGENT_GROWTH)) {
+            showGrowthHub(chatId, messageId, user);
+        } else if (callbackData.equals(CallbackData.AGENT_SETTINGS)) {
+            showSettingsHub(chatId, messageId, user);
         } else if (callbackData.equals(CallbackData.AGENT_LEADS)) {
             showLeads(chatId, messageId, user);
         } else if (callbackData.equals(CallbackData.AGENT_HELP)) {
@@ -76,11 +90,16 @@ public class ManagerHandler {
             showLearnings(chatId, messageId, user);
         } else if (callbackData.startsWith(CallbackData.AGENT_RADAR)) {
             adRadarHandler.handle(chatId, messageId, callbackData, user);
-        } else if (callbackData.equals(CallbackData.AGENT_SCOUT_STATUS)) {
-            scoutAdminHandler.showStatus(chatId, messageId, user);
+        } else if (callbackData.startsWith(CallbackData.AGENT_DEAL)) {
+            adDealHandler.handle(chatId, messageId, callbackData, user);
+        } else if (callbackData.startsWith(CallbackData.PREFIX_AGENT + "scout")) {
+            scoutAdminHandler.handle(chatId, messageId, user, callbackData);
         } else if (callbackData.startsWith(CallbackData.AGENT_OUTREACH)
                 || callbackData.equals(CallbackData.AGENT_OUTREACH)) {
             outreachHandler.handle(chatId, messageId, callbackData, user);
+        } else if (callbackData.equals(CallbackData.AGENT_PARSE)
+                || callbackData.startsWith(CallbackData.AGENT_PARSE)) {
+            outreachHandler.handleParse(chatId, messageId, callbackData, user);
         } else if (callbackData.startsWith(CallbackData.AGENT_REPLY_EDIT)) {
             promptCustomReply(chatId, user, parseId(callbackData, CallbackData.AGENT_REPLY_EDIT));
         } else if (callbackData.startsWith(CallbackData.AGENT_REPLY)) {
@@ -96,9 +115,9 @@ public class ManagerHandler {
         Optional<ChannelEntity> channelOpt = userService.findActiveChannel(user);
         if (channelOpt.isEmpty()) {
             send(chatId, messageId,
-                    "🧑\u200d💼 <b>Менеджер-агент в комментариях</b>\n\n"
+                    "🧑\u200d💼 <b>Pulse Ассистент</b>\n\n"
                             + "Сначала подключите канал (пришлите ссылку или перешлите пост из своего канала, "
-                            + "где бот админ). Потом агент начнёт ловить лидов в комментариях.",
+                            + "где бот админ). Потом ассистент начнёт ловить лидов в комментариях.",
                     keyboards.backToMainInline());
             return;
         }
@@ -116,27 +135,75 @@ public class ManagerHandler {
         long leadCount = hotLeadRepository.countByOwnerUserId(user.getId());
 
         StringBuilder sb = new StringBuilder();
-        sb.append("🧑\u200d💼 <b>Jarvis — ассистент канала</b>\n");
+        sb.append("🧑\u200d💼 <b>Pulse Ассистент</b>\n");
         sb.append("Канал: «").append(TgHtml.esc(channel.getTitle())).append("»\n\n");
-        sb.append("Агент следит за комментариями. Ловит цену / покупку / возражения — "
-                + "присылает горячий лид и <b>короткий живой черновик</b> по профилю компании.\n\n");
+        sb.append("Следит за комментариями и ловит горячие лиды — с черновиком ответа под ваш оффер.\n\n");
 
         sb.append("<b>Статус</b>\n");
-        sb.append(subscribed ? "• Доступ: ✅ активен\n" : "• Доступ: 🔒 нужна подписка (CONTENT/PRO)\n");
+        if (subscribed) {
+            AssistantQuotaService.DmQuotaSnapshot dm = assistantQuotaService.dmQuota(user.getId());
+            AssistantQuotaService.ParseQuotaSnapshot parse = assistantQuotaService.parseQuota(user.getId());
+            sb.append("• Доступ: ✅ активен");
+            if (dm.tierName() != null) {
+                sb.append(" · ").append(TgHtml.esc(dm.tierName()));
+            }
+            sb.append('\n');
+            sb.append("• ").append(dm.counterLine()).append('\n');
+            sb.append("• Парсинг: <b>").append(parse.remaining()).append("</b> ост.\n");
+        } else {
+            sb.append("• Доступ: 🔒 нужна подписка Ассистент (от 3990 ₽)\n");
+        }
         sb.append(linked
                 ? "• Комментарии: ✅ группа обсуждений подключена\n"
                 : "• Комментарии: ⚠️ группа не найдена — нужна настройка\n");
-        sb.append("• Агент: ").append(enabled ? "🟢 включён" : "⚪️ выключен").append('\n');
-        sb.append("• Профиль компании: ").append(hasFaq ? "✅ задан" : "⚠️ пуст").append('\n');
-        sb.append("• Книга возражений: ").append(hasObj ? "✅ есть" : "⚪️ пусто").append('\n');
-        sb.append("• Поймано лидов: <b>").append(leadCount).append("</b>\n");
+        sb.append("• В комментариях: ").append(enabled ? "🟢 включён" : "⚪️ выключен").append('\n');
+        sb.append("• Профиль компании: ").append(hasFaq ? "✅" : "⚠️").append(" · возражения: ")
+                .append(hasObj ? "✅" : "⚪️").append('\n');
+        sb.append("• Лидов: <b>").append(leadCount).append("</b>\n");
 
-        if (!linked) {
-            sb.append("\n👉 Нажмите «❓ Как подключить», чтобы включить комментарии и добавить бота в обсуждения.");
+        if (!subscribed) {
+            sb.append("\n👉 «💳 Тарифы» — один платёж: лиды + ЛС + парсинг в квоте.");
+        } else if (!linked) {
+            sb.append("\n👉 Раздел «⚙️ Настройка» → как подключить комментарии.");
         }
 
-        send(chatId, messageId, sb.toString(), keyboards.agentInline(enabled, subscribed, leadCount,
-                scoutAdminHandler.canViewScout(user)));
+        send(chatId, messageId, sb.toString(), keyboards.agentInline(enabled, subscribed, leadCount));
+    }
+
+    private void showSalesHub(long chatId, int messageId, UserEntity user) {
+        long leadCount = hotLeadRepository.countByOwnerUserId(user.getId());
+        send(chatId, messageId,
+                "🔥 <b>Лиды и продажи</b>\n\n"
+                        + "• <b>Лиды</b> — CRM по комментариям\n"
+                        + "• <b>Рассылка</b> — исходящие ЛС\n"
+                        + "• <b>Парсинг ЦА</b> — участники группы, отсев мёртвых/накрутки\n"
+                        + "• Профиль, возражения, выводы",
+                keyboards.agentSalesInline(leadCount));
+    }
+
+    private void showGrowthHub(long chatId, int messageId, UserEntity user) {
+        send(chatId, messageId,
+                "📈 <b>Рост</b>\n\n"
+                        + "• <b>Площадки для рекламы</b> — каналы ниши, проверка, креатив\n"
+                        + "• <b>Аналитика+</b> — глубокие метрики (CONTENT+)",
+                keyboards.agentGrowthInline());
+    }
+
+    private void showSettingsHub(long chatId, int messageId, UserEntity user) {
+        Optional<ChannelEntity> channelOpt = userService.findActiveChannel(user);
+        boolean subscribed = entitlementService.hasAccess(user.getId(), PerkType.MANAGER);
+        boolean enabled = channelOpt.map(ChannelEntity::isLeadAgentEnabled).orElse(false);
+        boolean linked = channelOpt.map(c -> c.getLinkedDiscussionChatId() != null).orElse(false);
+        String tip = linked
+                ? "✅ Группа обсуждений найдена — можно включать ассистента."
+                : """
+                Чтобы ловить лиды из комментариев:
+                1) В канале включите «Обсуждение»
+                2) Добавьте бота админом в эту группу
+                3) Вернитесь и включите ассистента""";
+        send(chatId, messageId,
+                "⚙️ <b>Настройка ассистента</b>\n\n" + tip,
+                keyboards.agentSettingsInline(enabled, subscribed));
     }
 
     private void toggle(long chatId, int messageId, UserEntity user) {
@@ -146,10 +213,7 @@ public class ManagerHandler {
             return;
         }
         if (!entitlementService.hasAccess(user.getId(), PerkType.MANAGER)) {
-            send(chatId, messageId,
-                    "🔒 <b>Нужна подписка</b>\n\n"
-                            + "Мини-агент в комментариях входит в тарифы CONTENT и PRO. "
-                            + "Оформить можно в разделе «💳 Тарифы».",
+            send(chatId, messageId, org.example.pulse_ai.text.SalesCopy.assistantPaywall(),
                     keyboards.backToMainInline());
             return;
         }

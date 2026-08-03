@@ -38,8 +38,10 @@ public class UpdateHandler {
     private final FeatureHandler featureHandler;
     private final ManagerHandler managerHandler;
     private final AdRadarHandler adRadarHandler;
+    private final AdDealHandler adDealHandler;
     private final OutreachHandler outreachHandler;
     private final PollHandler pollHandler;
+    private final ScoutAdminHandler scoutAdminHandler;
     private final org.example.pulse_ai.domain.lead.CommentLeadAgent commentLeadAgent;
 
     public void handle(Update update) {
@@ -175,64 +177,42 @@ public class UpdateHandler {
             menuHandler.showMainMenu(chatId, user);
             return;
         }
-        if (MenuText.CMD_HELP.equals(text) || MenuText.BTN_HELP.equals(text)) {
-            menuHandler.showHelp(chatId);
-            return;
-        }
-        if (MenuText.BTN_HOW.equals(text)) {
-            menuHandler.showHowItWorks(chatId);
-            return;
-        }
-        if (MenuText.BTN_CONNECT_PUBLISH.equals(text)) {
-            channelHandler.showPublishConnectInstructions(chatId);
-            return;
-        }
-        if (MenuText.BTN_BUY.equals(text)) {
-            paymentHandler.showPackages(chatId);
-            return;
-        }
-        if (MenuText.CMD_PRODUCT.equals(text)) {
-            productChannelHandler.showMenu(chatId, user);
-            return;
-        }
-        if (MenuText.CMD_BALANCE.equals(text)) {
-            menuHandler.showBalance(chatId, user);
-            return;
-        }
-        if (MenuText.CMD_HISTORY.equals(text) || MenuText.BTN_REPORTS.equals(text)
-                || MenuText.BTN_ANALYTICS.equals(text)) {
-            menuHandler.showAnalyticsHub(chatId, user);
-            return;
-        }
-        if (MenuText.BTN_CONTENT.equals(text)) {
-            menuHandler.showContentHub(chatId, user);
-            return;
-        }
-        if (MenuText.CMD_SCHEDULED.equals(text) || MenuText.BTN_SCHEDULED.equals(text)) {
-            publishHandler.openScheduledList(chatId, user);
-            return;
-        }
-        if (MenuText.CMD_MANAGER.equals(text) || MenuText.BTN_MANAGER.equals(text)) {
-            managerHandler.open(chatId, user);
-            return;
-        }
-        if (MenuText.CMD_CHANNEL.equals(text) || MenuText.BTN_SETTINGS.equals(text)) {
-            menuHandler.showSettings(chatId, user);
-            return;
-        }
-        if (MenuText.BTN_ANALYZE.equals(text)) {
-            if (userService.findActiveChannel(user).isPresent()) {
-                if (analysisRequestService.hasActiveRequest(user.getId())) {
-                    messageSender.sendText(chatId, BotMessages.ANALYSIS_IN_PROGRESS);
-                } else {
-                    callbackRouter.route(chatId, user, CallbackData.REQ_FREE);
-                }
+        if (MenuText.CMD_SCOUT.equals(text)) {
+            if (scoutAdminHandler.canViewScout(user)) {
+                scoutAdminHandler.showStatus(chatId, 0, user);
             } else {
-                messageSender.sendText(chatId, "Пришлите ссылку на канал в чат — например t.me/durov");
+                messageSender.sendText(chatId, "🔒 Команда только для админов Pulse.");
             }
             return;
         }
 
+        // Состояния ввода — раньше кнопок меню, иначе текст поста/времени теряется.
+        if (session.getState() == BotState.POST_EDIT) {
+            String md = org.example.pulse_ai.text.TgMarkdown.fromMessage(message);
+            if (md.isBlank()) {
+                messageSender.sendText(chatId, "Отправьте текст поста одним сообщением.");
+                return;
+            }
+            publishHandler.handleEditedText(chatId, user, md);
+            return;
+        }
+        if (session.getState() == BotState.PRODUCT_EDIT) {
+            String md = org.example.pulse_ai.text.TgMarkdown.fromMessage(message);
+            if (md.isBlank()) {
+                messageSender.sendText(chatId, "Отправьте текст поста одним сообщением.");
+                return;
+            }
+            productChannelHandler.handleEditedText(chatId, user, md);
+            return;
+        }
+        if (session.getState() == BotState.SCHEDULE_TIME_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите дату и время: ДД.ММ ЧЧ:ММ (МСК).");
+                return;
+            }
+            publishHandler.handleScheduleTimeInput(chatId, user, text.trim());
+            return;
+        }
         if (session.getState() == BotState.COMPETITOR_INPUT) {
             if (text.isBlank()) {
                 messageSender.sendText(chatId, "Пришлите ссылку на канал конкурента.");
@@ -247,14 +227,6 @@ public class UpdateHandler {
                 return;
             }
             featureHandler.handleSellingInput(chatId, user, text.trim());
-            return;
-        }
-        if (session.getState() == BotState.SCHEDULE_TIME_INPUT) {
-            if (text.isBlank()) {
-                messageSender.sendText(chatId, "Пришлите дату и время: ДД.ММ ЧЧ:ММ (МСК).");
-                return;
-            }
-            publishHandler.handleScheduleTimeInput(chatId, user, text.trim());
             return;
         }
         if (session.getState() == BotState.AGENT_REPLY_INPUT) {
@@ -321,6 +293,14 @@ public class UpdateHandler {
             outreachHandler.handleImportInput(chatId, user, text.trim());
             return;
         }
+        if (session.getState() == BotState.AUDIENCE_PARSE_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите ссылку на группу или @chat.");
+                return;
+            }
+            outreachHandler.handleParseLinkInput(chatId, user, text.trim());
+            return;
+        }
         if (session.getState() == BotState.POLL_OPTIONS_INPUT) {
             if (text.isBlank()) {
                 messageSender.sendText(chatId, "Пришлите варианты по одному на строку (минимум 2).");
@@ -329,24 +309,105 @@ public class UpdateHandler {
             pollHandler.handleCustomOptionsInput(chatId, user, text.trim());
             return;
         }
+        if (session.getState() == BotState.STYLE_PROMPT_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришлите промпт стиля одним сообщением.");
+                return;
+            }
+            menuHandler.handleStylePromptInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.AD_DEAL_PRICE_INPUT) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Введите цену числом, например 2500");
+                return;
+            }
+            adDealHandler.handlePriceInput(chatId, user, text.trim());
+            return;
+        }
+        if (session.getState() == BotState.PRODUCT_RELEASE_ADD) {
+            if (text.isBlank()) {
+                messageSender.sendText(chatId, "Пришли текст апдейта (версия + буллеты).");
+                return;
+            }
+            productChannelHandler.handleReleaseInput(chatId, user, text);
+            return;
+        }
+
+        if (MenuText.CMD_HELP.equals(text) || MenuText.BTN_HELP.equals(text)) {
+            menuHandler.showHelp(chatId);
+            return;
+        }
+        if (MenuText.BTN_HOW.equals(text)) {
+            menuHandler.showHowItWorks(chatId);
+            return;
+        }
+        if (MenuText.BTN_CONNECT_PUBLISH.equals(text)) {
+            channelHandler.showPublishConnectInstructions(chatId);
+            return;
+        }
+        if (MenuText.BTN_BUY.equals(text)) {
+            paymentHandler.showPackages(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_PRODUCT.equals(text)) {
+            productChannelHandler.showMenu(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_BALANCE.equals(text)) {
+            menuHandler.showBalance(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_HISTORY.equals(text) || MenuText.BTN_REPORTS.equals(text)
+                || MenuText.BTN_ANALYTICS.equals(text)) {
+            menuHandler.showAnalyticsHub(chatId, user);
+            return;
+        }
+        if (MenuText.BTN_CONTENT.equals(text)) {
+            menuHandler.showContentHub(chatId, user);
+            return;
+        }
+        if (MenuText.BTN_GROWTH.equals(text)) {
+            menuHandler.showGrowth(chatId, user);
+            return;
+        }
+        if (MenuText.BTN_MORE.equals(text)) {
+            menuHandler.showMore(chatId, user);
+            return;
+        }
+        if (MenuText.BTN_STYLE_PROMPT.equals(text)) {
+            menuHandler.showStylePrompt(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_SCHEDULED.equals(text) || MenuText.BTN_SCHEDULED.equals(text)) {
+            publishHandler.openScheduledList(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_MANAGER.equals(text)
+                || MenuText.BTN_ASSISTANT.equals(text)
+                || MenuText.BTN_MANAGER_LEGACY.equals(text)) {
+            managerHandler.open(chatId, user);
+            return;
+        }
+        if (MenuText.CMD_CHANNEL.equals(text) || MenuText.BTN_SETTINGS.equals(text)) {
+            menuHandler.showSettings(chatId, user);
+            return;
+        }
+        if (MenuText.BTN_ANALYZE.equals(text)) {
+            if (userService.findActiveChannel(user).isPresent()) {
+                if (analysisRequestService.hasActiveRequest(user.getId())) {
+                    messageSender.sendText(chatId, BotMessages.ANALYSIS_IN_PROGRESS);
+                } else {
+                    callbackRouter.route(chatId, user, CallbackData.REQ_FREE);
+                }
+            } else {
+                messageSender.sendText(chatId, "Пришлите ссылку на канал в чат — например t.me/durov");
+            }
+            return;
+        }
+
         if (session.getState() == BotState.CONNECT_CHANNEL || looksLikeChannelLink(text)) {
             handleConnectInput(chatId, user, message);
-            return;
-        }
-        if (session.getState() == BotState.POST_EDIT) {
-            if (text.isBlank()) {
-                messageSender.sendText(chatId, "Отправьте текст поста одним сообщением.");
-                return;
-            }
-            publishHandler.handleEditedText(chatId, user, text);
-            return;
-        }
-        if (session.getState() == BotState.PRODUCT_EDIT) {
-            if (text.isBlank()) {
-                messageSender.sendText(chatId, "Отправьте текст поста одним сообщением.");
-                return;
-            }
-            productChannelHandler.handleEditedText(chatId, user, text);
             return;
         }
 

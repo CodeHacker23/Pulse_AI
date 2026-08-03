@@ -2,7 +2,9 @@ package org.example.pulse_ai.domain.payment;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.pulse_ai.domain.entitlement.AssistantQuotaService;
 import org.example.pulse_ai.domain.entitlement.EntitlementService;
+import org.example.pulse_ai.domain.entitlement.PerkType;
 import org.example.pulse_ai.persistence.entity.BalanceTransactionEntity;
 import org.example.pulse_ai.persistence.entity.PackageEntity;
 import org.example.pulse_ai.persistence.entity.PaymentEntity;
@@ -24,6 +26,7 @@ public class PaymentService {
 
     public static final String PAYLOAD_PREFIX = "pulse:pay:";
     public static final String PROVIDER_STARS = "telegram_stars";
+    private static final int ASSISTANT_DAYS = 30;
 
     private final PaymentRepository paymentRepository;
     private final PackageRepository packageRepository;
@@ -38,6 +41,10 @@ public class PaymentService {
                 .orElseThrow(() -> new IllegalArgumentException("Пакет не найден"));
         if (pack.getStarsAmount() == null || pack.getStarsAmount() <= 0) {
             throw new IllegalStateException("Для пакета не настроена цена в Stars");
+        }
+        PackageKind kind = PackageKind.from(pack.getKind());
+        if (kind == PackageKind.LS_TOPUP && !entitlementService.hasAccess(user.getId(), PerkType.MANAGER)) {
+            throw new IllegalStateException("Допы ЛС доступны только при активной подписке ассистента");
         }
 
         PaymentEntity payment = new PaymentEntity();
@@ -99,25 +106,63 @@ public class PaymentService {
             return Optional.empty();
         }
 
-        int credited = pack.getRequestCount();
-        user.setBalance(user.getBalance() + credited);
-        userRepository.save(user);
+        PackageKind kind = PackageKind.from(pack.getKind());
+        int credited = 0;
+        short perksToPick = 0;
 
-        recordBalance(user.getId(), credited, user.getBalance(), "stars_purchase", payment.getId());
+        switch (kind) {
+            case ANALYSIS -> {
+                credited = pack.getRequestCount();
+                user.setBalance(user.getBalance() + credited);
+                userRepository.save(user);
+                recordBalance(user.getId(), credited, user.getBalance(), "stars_purchase", payment.getId());
+                perksToPick = pack.getPerkChoicesCount();
+                if (pack.isIncludesPriority()) {
+                    entitlementService.grantPriority(user.getId(), payment.getId());
+                }
+            }
+            case ASSISTANT -> applyAssistantSubscription(user.getId(), pack, payment.getId());
+            case LS_TOPUP -> {
+                if (!entitlementService.hasAccess(user.getId(), PerkType.MANAGER)) {
+                    payment.setStatus(PaymentStatus.FAILED);
+                    paymentRepository.save(payment);
+                    return Optional.empty();
+                }
+                entitlementService.grantRaw(
+                        user.getId(),
+                        AssistantQuotaService.PERK_OUTREACH_TOPUP,
+                        pack.getDmQuota(),
+                        null,
+                        payment.getId());
+            }
+        }
 
         payment.setExternalId(telegramPaymentChargeId);
         payment.setStatus(PaymentStatus.COMPLETED);
         payment.setRequestsCredited(credited);
-        payment.setPerksRemainingToPick(pack.getPerkChoicesCount());
+        payment.setPerksRemainingToPick(perksToPick);
         payment.setCompletedAt(Instant.now());
         paymentRepository.save(payment);
 
-        if (pack.isIncludesPriority()) {
-            entitlementService.grantPriority(user.getId(), payment.getId());
-        }
-
-        log.info("Stars payment completed: user={}, package={}, +{} requests", user.getId(), pack.getCode(), credited);
+        log.info("Stars payment completed: user={}, package={}, kind={}, +{} requests",
+                user.getId(), pack.getCode(), kind, credited);
         return Optional.of(payment);
+    }
+
+    private void applyAssistantSubscription(Long userId, PackageEntity pack, Long paymentId) {
+        entitlementService.grant(userId, PerkType.MANAGER, paymentId);
+        entitlementService.grantRaw(userId, pack.getCode(), null, ASSISTANT_DAYS, paymentId);
+        if (pack.getParseQuota() > 0) {
+            entitlementService.grantRaw(
+                    userId, AssistantQuotaService.PERK_PARSE_OWN, pack.getParseQuota(), ASSISTANT_DAYS, paymentId);
+        }
+        if (pack.isIncludesFindAudience()) {
+            entitlementService.grantRaw(
+                    userId, AssistantQuotaService.PERK_FIND_AUDIENCE, null, ASSISTANT_DAYS, paymentId);
+        }
+        if (pack.isIncludesPriority()) {
+            entitlementService.grantPriority(userId, paymentId);
+        }
     }
 
     @Transactional

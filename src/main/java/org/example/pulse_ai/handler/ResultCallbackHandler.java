@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.pulse_ai.config.PulseAnalysisProperties;
 import org.example.pulse_ai.config.PulseBillingProperties;
 import org.example.pulse_ai.domain.analysis.AnalysisSnapshotService;
+import org.example.pulse_ai.domain.analysis.ContentPlanService;
 import org.example.pulse_ai.domain.analysis.DeepAnalysisSections;
 import org.example.pulse_ai.domain.analysis.GeneratedPostService;
 import org.example.pulse_ai.domain.analysis.IdeasGenerationService;
@@ -56,6 +57,7 @@ public class ResultCallbackHandler {
     private final StatsMessageBuilder statsMessageBuilder;
     private final AnalysisChartRenderer chartRenderer;
     private final IdeasGenerationService ideasGenerationService;
+    private final ContentPlanService contentPlanService;
     private final PostDraftService postDraftService;
     private final PollDraftService pollDraftService;
     private final PollHandler pollHandler;
@@ -67,6 +69,7 @@ public class ResultCallbackHandler {
     private final PulseBillingProperties billingProperties;
     private final UserSessionService sessionService;
     private final PackageRepository packageRepository;
+    private final org.example.pulse_ai.stats.external.TgstatAccessService tgstatAccessService;
 
     public boolean handles(String callbackData) {
         return callbackData.startsWith(CallbackData.PREFIX_RESULT);
@@ -113,6 +116,10 @@ public class ResultCallbackHandler {
             handleIdeasRegen(chatId, messageId, callbackData);
             return;
         }
+        if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "plan:")) {
+            handleContentPlan(chatId, messageId, callbackData);
+            return;
+        }
         if (callbackData.startsWith(CallbackData.PREFIX_RESULT + "charts:")) {
             handleCharts(chatId, callbackData);
             return;
@@ -148,17 +155,21 @@ public class ResultCallbackHandler {
             return;
         }
 
-        ChannelEntity channel = refreshMetrics(ctx.channel());
+        ChannelEntity channel = refreshMetrics(ctx.channel(), ctx.request());
         AnalysisMetrics metrics = analyticsService.analyze(
                 channel.getId(),
                 ctx.request().getPeriodFrom(),
                 ctx.request().getPeriodTo()
         );
-        ExternalChannelMetrics external = externalMetricsService.bestMetrics(channel.getUsername());
-        int subscribers = channel.getSubscriberCount() != null ? channel.getSubscriberCount() : 0;
-        if (external.subscribers() != null && external.subscribers() > 0) {
-            subscribers = external.subscribers();
+        ExternalChannelMetrics external = ExternalChannelMetrics.unavailable("skip", "");
+        if (tgstatAccessService.forAnalysis(ctx.request().getUserId(), ctx.request().getType())) {
+            ExternalChannelMetrics fetched = externalMetricsService.bestMetrics(channel.getUsername());
+            if (fetched != null) {
+                external = fetched;
+            }
         }
+        int channelSubs = channel.getSubscriberCount() != null ? channel.getSubscriberCount() : 0;
+        int subscribers = resolveDisplaySubscribers(channelSubs, external, metrics);
 
         String text = statsMessageBuilder.build(
                 requestId, channel.getTitle(), subscribers, metrics, external);
@@ -197,6 +208,22 @@ public class ResultCallbackHandler {
     private void handleIdeas(long chatId, int messageId, String callbackData) {
         long requestId = parseRequestId(callbackData, "ideas:");
         renderIdeasPage(chatId, messageId, requestId, 0);
+    }
+
+    private void handleContentPlan(long chatId, int messageId, String callbackData) {
+        long requestId = parseRequestId(callbackData, "plan:");
+        RequestContext ctx = loadContext(requestId);
+        if (ctx == null) {
+            return;
+        }
+        String text = contentPlanService.formatPlanSummary(ctx.channel().getId())
+                + "\n\n<i>Новые идеи не повторяют выбранное и опубликованное.</i>";
+        InlineKeyboardMarkup keyboard = keyboards.contentPlanInline(requestId);
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, text, keyboard);
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, text, keyboard);
+        }
     }
 
     private void handleIdeaPage(long chatId, int messageId, String callbackData) {
@@ -281,12 +308,15 @@ public class ResultCallbackHandler {
                     ctx.request().getPeriodTo()
             );
             int count = Math.min(IDEAS_POOL_MAX, billingProperties.ideasFor(ctx.request().getType()));
+            List<String> exclude = contentPlanService.excludedTitles(ctx.channel().getId());
             List<ContentIdeaEntity> ideas = ideasGenerationService.generateIdeas(
                     requestId,
                     ctx.channel().getTitle(),
                     metrics,
                     count,
-                    analysisProperties.getLlmTimeoutSeconds()
+                    analysisProperties.getLlmTimeoutSeconds(),
+                    exclude,
+                    snapshotService.contentBrief(requestId)
             );
             snapshotService.replaceIdeas(requestId, ideas);
             session.consumeIdeasRegen(requestId);
@@ -306,7 +336,7 @@ public class ResultCallbackHandler {
             return;
         }
 
-        ChannelEntity channel = refreshMetrics(ctx.channel());
+        ChannelEntity channel = refreshMetrics(ctx.channel(), ctx.request());
         AnalysisMetrics metrics = analyticsService.analyze(
                 channel.getId(),
                 ctx.request().getPeriodFrom(),
@@ -361,6 +391,8 @@ public class ResultCallbackHandler {
             return;
         }
 
+        contentPlanService.markChosen(ctx.channel().getId(), idea, requestId);
+
         // Идея-опрос → нативный Telegram Poll, а не текстовый черновик.
         if (PollDraftService.isPollFormat(idea.getFormat())) {
             if (messageId > 0) {
@@ -369,6 +401,7 @@ public class ResultCallbackHandler {
             PollDraftService.PollDraft poll = pollDraftService.generate(ctx.channel().getTitle(), idea);
             GeneratedPostEntity savedPoll = generatedPostService.savePollDraft(
                     requestId, idea, poll.question(), poll.options(), true);
+            contentPlanService.markDrafted(ctx.channel().getId(), idea, requestId);
             session.setPostId(savedPoll.getId());
             session.setRequestId(requestId);
             pollHandler.showPollBuilder(chatId, messageId, savedPoll, requestId);
@@ -388,10 +421,13 @@ public class ResultCallbackHandler {
                 ctx.channel().getTitle(),
                 idea,
                 metrics,
-                analysisProperties.getLlmTimeoutSeconds()
+                analysisProperties.getLlmTimeoutSeconds(),
+                ctx.channel().getContentStylePrompt(),
+                snapshotService.contentBrief(requestId)
         );
 
         GeneratedPostEntity savedPost = generatedPostService.saveRegeneratedDraft(requestId, idea, draft);
+        contentPlanService.markDrafted(ctx.channel().getId(), idea, requestId);
         session.setPostId(savedPost.getId());
         session.setRequestId(requestId);
 
@@ -404,6 +440,7 @@ public class ResultCallbackHandler {
         String text = ConversionCopy.draftHeader(idea.getTitle())
                 + "\n\n"
                 + TgHtml.fromMarkdown(draft)
+                + ConversionCopy.draftPhotoHint(org.example.pulse_ai.telegram.TelegramLimits.fitsPhotoCaption(draft))
                 + footerBlock(ctx.freeTier(), draftsLeft);
         InlineKeyboardMarkup keyboard = keyboards.draftResultInline(
                 requestId, ideaId, savedPost.getId(), sectionTotal, teaser, ctx.freeTier(), draftsLeft);
@@ -447,7 +484,9 @@ public class ResultCallbackHandler {
                 ideas,
                 metrics,
                 postCount,
-                analysisProperties.getLlmTimeoutSeconds()
+                analysisProperties.getLlmTimeoutSeconds(),
+                ctx.channel().getContentStylePrompt(),
+                snapshotService.contentBrief(requestId)
         );
 
         StringBuilder text = new StringBuilder();
@@ -540,7 +579,9 @@ public class ResultCallbackHandler {
                     ctx.channel().getTitle(),
                     metrics,
                     count,
-                    analysisProperties.getLlmTimeoutSeconds()
+                    analysisProperties.getLlmTimeoutSeconds(),
+                    contentPlanService.excludedTitles(ctx.channel().getId()),
+                    snapshotService.contentBrief(ctx.request().getId())
             );
             snapshotService.saveIdeas(ideas);
         } catch (Exception ex) {
@@ -567,7 +608,15 @@ public class ResultCallbackHandler {
         sb.append("\n\n");
         int n = globalStart + 1;
         for (ContentIdeaEntity idea : pageIdeas) {
-            sb.append(ConversionCopy.ideaBlock(n++, idea.getTitle(), idea.getReason(), idea.getFormat(), idea.getSuggestedDay()));
+            sb.append(ConversionCopy.ideaBlock(
+                    n++,
+                    idea.getTitle(),
+                    idea.getReason(),
+                    idea.getFormat(),
+                    idea.getSuggestedDay(),
+                    idea.getClosesGap(),
+                    idea.getCta()
+            ));
             sb.append('\n');
         }
         if (totalPages > 1) {
@@ -626,8 +675,15 @@ public class ResultCallbackHandler {
     }
 
     /** Перед показом статистики — свежий sync + чистка мусорных просмотров. */
+    private ChannelEntity refreshMetrics(ChannelEntity channel, AnalysisRequestEntity request) {
+        boolean useTgstat = request != null
+                && tgstatAccessService.forAnalysis(request.getUserId(), request.getType());
+        channelSyncService.syncForAnalysis(channel, useTgstat);
+        return channelRepository.findById(channel.getId()).orElse(channel);
+    }
+
     private ChannelEntity refreshMetrics(ChannelEntity channel) {
-        channelSyncService.syncForAnalysis(channel);
+        channelSyncService.syncForAnalysis(channel, false);
         return channelRepository.findById(channel.getId()).orElse(channel);
     }
 
@@ -647,6 +703,29 @@ public class ResultCallbackHandler {
     private static long parseRequestId(String callbackData, String prefix) {
         String idStr = callbackData.substring((CallbackData.PREFIX_RESULT + prefix).length());
         return Long.parseLong(idStr);
+    }
+
+    /**
+     * Внешний источник (Telega/TGStat) не должен показывать 7.9k при реальных 6.
+     * Приоритет: цифра канала (Bot API / t.me), внешняя — только если согласована.
+     */
+    static int resolveDisplaySubscribers(int channelSubs, ExternalChannelMetrics external, AnalysisMetrics metrics) {
+        Integer ext = external != null ? external.subscribers() : null;
+        if (ext == null || ext <= 0) {
+            return Math.max(channelSubs, 0);
+        }
+        if (channelSubs > 0 && channelSubs <= 500 && ext > channelSubs * 5L) {
+            return channelSubs;
+        }
+        if (channelSubs > 0 && metrics != null && metrics.avgViews() > 0
+                && metrics.avgViews() < 50 && ext > 1_000) {
+            return channelSubs;
+        }
+        if (channelSubs <= 0) {
+            return ext;
+        }
+        // Канал уже знает цифру — внешнюю не подменяем в UI.
+        return channelSubs;
     }
 
     private record RequestContext(AnalysisRequestEntity request, ChannelEntity channel, boolean freeTier) {

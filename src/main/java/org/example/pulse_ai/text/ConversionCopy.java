@@ -46,10 +46,25 @@ public final class ConversionCopy {
     }
 
     public static String ideaBlock(int number, String title, String reason, String format, String day) {
+        return ideaBlock(number, title, reason, format, day, null, null);
+    }
+
+    public static String ideaBlock(
+            int number,
+            String title,
+            String reason,
+            String format,
+            String day,
+            String closesGap,
+            String cta
+    ) {
         StringBuilder sb = new StringBuilder();
         sb.append(TgHtml.b(number + ". " + TextHumanizer.humanize(title))).append("\n\n");
         if (reason != null && !reason.isBlank()) {
             sb.append(formatIdeaReason(reason)).append("\n\n");
+        }
+        if (closesGap != null && !closesGap.isBlank() && !"н/д".equalsIgnoreCase(closesGap.trim())) {
+            sb.append("📉 Закрывает: <i>").append(TgHtml.esc(closesGap.trim())).append("</i>\n");
         }
         if (day != null || format != null) {
             sb.append("📅 ");
@@ -63,6 +78,9 @@ public final class ConversionCopy {
                 sb.append(TgHtml.esc(format));
             }
             sb.append('\n');
+        }
+        if (cta != null && !cta.isBlank()) {
+            sb.append("👉 ").append(TgHtml.esc(cta.trim())).append('\n');
         }
         return sb.toString();
     }
@@ -126,15 +144,40 @@ public final class ConversionCopy {
                 TgHtml.fromMarkdown(postText)).trim();
     }
 
+    public static String photoCaptionTooLong(int htmlLength, int overflow) {
+        return """
+                ⚠️ <b>Пост слишком длинный для фото</b>
+
+                Telegram: подпись к фото — максимум <b>1024</b> символа (HTML).
+                Сейчас: <b>%d</b> (перебор ~%d).
+
+                Варианты:
+                • <b>Сократить</b> — сожму текст под лимит и подберу фото
+                • <b>Без фото</b> — опубликуем полным текстом""".formatted(
+                htmlLength, Math.max(1, overflow)).trim();
+    }
+
+    public static String draftPhotoHint(boolean fitsCaption) {
+        if (fitsCaption) {
+            return "\n\n<i>🖼 Длина ок для публикации с фото.</i>";
+        }
+        return "\n\n⚠️ <i>Текст длиннее лимита подписи к фото (1024). "
+                + "С картинкой — только после сокращения, либо публикуйте без фото.</i>";
+    }
+
     public static String publishEditPrompt(String currentText) {
         return """
                 ✏️ <b>Редактирование поста</b>
 
-                Текущий текст:
+                Как будет выглядеть:
                 %s
 
-                <i>Отправьте новый текст одним сообщением.</i>""".formatted(
-                TgHtml.esc(currentText)).trim();
+                Пришлите <b>новый текст одним сообщением</b>.
+                Можно выделить жирным/курсивом прямо в Telegram — пойму.
+                Либо пишите с <code>**жирный**</code> и <code>_курсив_</code>.
+
+                <i>/cancel — отмена</i>""".formatted(
+                TgHtml.fromMarkdown(currentText)).trim();
     }
 
     public static String publishInProgress(String channelTitle) {
@@ -166,7 +209,14 @@ public final class ConversionCopy {
         return """
                 📤 <b>Публикация недоступна</b>
 
-                %s""".formatted(TgHtml.esc(reason)).trim();
+                %s
+
+                <b>Как включить публикацию:</b>
+                1. Свой канал → Администраторы → добавьте бота
+                2. Право: <b>Публикация сообщений</b>
+                3. Перешлите сюда любой пост из <b>своего</b> канала
+
+                Анализ по ссылке ≠ право публиковать в этот канал.""".formatted(reason).trim();
     }
 
     public static String lockAlert() {

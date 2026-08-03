@@ -120,6 +120,7 @@ public class AdPlacementQualityService {
             case "DEAD" -> "💀 Мёртвый";
             case "LOW" -> "⚠️ Слабая активность";
             case "SPAM_HEAVY" -> "🚫 Много рекламы";
+            case "CANDIDATE" -> "📌";
             default -> "❓ Не проверен";
         };
     }

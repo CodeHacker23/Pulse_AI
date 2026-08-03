@@ -8,4 +8,6 @@ import java.util.List;
 public interface AdRadarHitRepository extends JpaRepository<AdRadarHitEntity, Long> {
 
     List<AdRadarHitEntity> findTop10ByUserIdAndStatusOrderByCreatedAtDesc(Long userId, String status);
+
+    boolean existsByUserIdAndWatchSourceIdAndSnippet(Long userId, Long watchSourceId, String snippet);
 }

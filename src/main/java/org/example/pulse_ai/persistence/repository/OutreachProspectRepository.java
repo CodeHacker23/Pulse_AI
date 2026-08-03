@@ -12,6 +12,8 @@ public interface OutreachProspectRepository extends JpaRepository<OutreachProspe
 
     long countByCampaignIdAndStatus(Long campaignId, String status);
 
+    long countByStatus(String status);
+
     Optional<OutreachProspectEntity> findFirstByCampaignIdAndStatusOrderByCreatedAtAsc(
             Long campaignId, String status);
 }

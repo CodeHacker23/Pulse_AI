@@ -49,7 +49,7 @@ public class LeadFollowUpScheduler {
                     : TgHtml.esc(lead.getCommenterName() != null ? lead.getCommenterName() : "клиент");
             String text = "⏰ <b>Лид без ответа 24ч+</b>\n"
                     + name + " — «" + TgHtml.esc(trim(lead.getCommentText(), 80)) + "»\n\n"
-                    + "Jarvis → 🔥 Лиды — дожмите или отметьте статус.";
+                    + "Pulse Ассистент → 🔥 Лиды — дожмите или отметьте статус.";
             messageSender.sendTextSafe(user.getTelegramId(), text);
         });
     }

@@ -2,6 +2,7 @@ package org.example.pulse_ai.domain.publish;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.pulse_ai.domain.analysis.ContentPlanService;
 import org.example.pulse_ai.domain.analysis.GeneratedPostService;
 import org.example.pulse_ai.domain.channel.DiscussionLinkService;
 import org.example.pulse_ai.persistence.entity.ChannelEntity;
@@ -23,18 +24,19 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ChannelPublishService {
 
-    private static final int TELEGRAM_CAPTION_LIMIT = 1024;
+    private static final int TELEGRAM_CAPTION_LIMIT = org.example.pulse_ai.telegram.TelegramLimits.PHOTO_CAPTION_HTML;
 
     private final TelegramBotApiService botApi;
     private final TelegramMessageSender messageSender;
     private final ChannelRepository channelRepository;
     private final PublishedPostRepository publishedPostRepository;
     private final DiscussionLinkService discussionLinkService;
+    private final ContentPlanService contentPlanService;
 
     public PublishReadiness checkReadiness(ChannelEntity channel) {
         if (channel.getTelegramChatId() == null) {
             return PublishReadiness.blocked(
-                    "Канал не подключён к Telegram. Перешлите пост из своего канала, где бот — админ.");
+                    "Канал не привязан к Telegram-чату. Перешлите пост из <b>своего</b> канала, где бот — админ.");
         }
         TelegramBotApiService.BotAdminStatus status = botApi.verifyBotIsAdmin(channel.getTelegramChatId());
         channel.setBotIsAdmin(status.isAdmin());
@@ -44,12 +46,12 @@ public class ChannelPublishService {
 
         if (!status.isAdmin() || !status.canPost()) {
             String hint = status.errorMessage() != null
-                    ? status.errorMessage()
+                    ? TgHtml.esc(status.errorMessage())
                     : "Нужны права администратора с публикацией сообщений.";
             return PublishReadiness.blocked(
-                    "Бот не может публиковать в «" + channel.getTitle() + "».\n\n"
-                            + hint + "\n\n"
-                            + "Перешлите пост из своего канала после добавления бота админом.");
+                    "Бот <b>не админ</b> (или без права постить) в «"
+                            + TgHtml.esc(channel.getTitle()) + "».\n"
+                            + hint);
         }
         return PublishReadiness.ok();
     }
@@ -217,6 +219,20 @@ public class ChannelPublishService {
         published.setTelegramMessageId(messageId);
         published.setPostLink(link);
         publishedPostRepository.save(published);
+
+        if (generatedPost.getIdeaId() != null || (finalStored != null && !finalStored.isBlank())) {
+            String title = finalStored != null && !finalStored.isBlank()
+                    ? finalStored.lines().findFirst().orElse(finalStored).strip()
+                    : "post";
+            if (title.length() > 200) {
+                title = title.substring(0, 200);
+            }
+            contentPlanService.markPublished(
+                    channel.getId(),
+                    generatedPost.getIdeaId(),
+                    title,
+                    generatedPost.getRequestId());
+        }
 
         log.info("Published {} {} to channel {} (msg {})",
                 GeneratedPostService.isPoll(generatedPost) ? "poll" : "post",

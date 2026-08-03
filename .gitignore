@@ -41,3 +41,13 @@ application-local.yaml
 .env
 .env.local
 data/
+
+### Scout sidecar runtime (also in scout-sidecar/.gitignore) ###
+scout-sidecar/accounts.json
+scout-sidecar/accounts.secrets.json
+scout-sidecar/sessions/
+scout-sidecar/.venv/
+
+### Local runtime logs ###
+bootrun*.log
+*.log

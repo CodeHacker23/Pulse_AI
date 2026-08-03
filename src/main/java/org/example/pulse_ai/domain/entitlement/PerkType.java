@@ -70,7 +70,7 @@ public enum PerkType {
             "Мини-агент админа: ловит горячих лидов в комментариях и сразу пингует вас",
             null,
             30,
-            List.of("CONTENT", "PRO")
+            List.of() // только через подписку ASSIST / ASSIST_PLUS / ASSIST_PRO
     );
 
     private final String label;

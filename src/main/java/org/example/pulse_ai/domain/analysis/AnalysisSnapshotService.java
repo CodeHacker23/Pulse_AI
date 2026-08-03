@@ -78,6 +78,12 @@ public class AnalysisSnapshotService {
         return List.of();
     }
 
+    /** Бриф разбора для промптов идей/черновиков. */
+    @Transactional(readOnly = true)
+    public String contentBrief(Long requestId) {
+        return AnalysisBriefForContent.fromSections(getSections(requestId));
+    }
+
     @Transactional
     public void saveIdeas(List<ContentIdeaEntity> ideas) {
         ideaRepository.saveAll(ideas);

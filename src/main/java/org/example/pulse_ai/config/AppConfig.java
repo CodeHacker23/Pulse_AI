@@ -16,7 +16,8 @@ import org.springframework.context.annotation.Configuration;
         PulseProductChannelProperties.class,
         PulseImageProperties.class,
         PulseOutreachProperties.class,
-        PulseScoutProperties.class
+        PulseScoutProperties.class,
+        PulseAdminProperties.class
 })
 public class AppConfig {
 

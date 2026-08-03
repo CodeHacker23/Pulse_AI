@@ -3,7 +3,9 @@ package org.example.pulse_ai.domain.radar;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.pulse_ai.config.PulseScoutProperties;
+import org.example.pulse_ai.domain.analysis.ContentPlanService;
 import org.example.pulse_ai.domain.scout.ScoutAccountService;
+import org.example.pulse_ai.domain.scout.ScoutActionLogService;
 import org.example.pulse_ai.domain.scout.ScoutSessionGateway;
 import org.example.pulse_ai.persistence.entity.AdRadarHitEntity;
 import org.example.pulse_ai.persistence.entity.AdWatchSourceEntity;
@@ -29,6 +31,8 @@ public class AdRadarObserverWorker {
     private final AdRadarHitRepository hitRepository;
     private final ScoutAccountService scoutAccountService;
     private final ScoutSessionGateway scoutGateway;
+    private final ScoutActionLogService actionLogService;
+    private final ContentPlanService contentPlanService;
     private final UserRepository userRepository;
     private final TelegramMessageSender messageSender;
 
@@ -37,9 +41,7 @@ public class AdRadarObserverWorker {
         if (!scoutProperties.isEnabled() || !scoutProperties.sidecarConfigured()) {
             return;
         }
-        Optional<ScoutAccountEntity> observer = scoutAccountService.listAll().stream()
-                .filter(a -> "OBSERVER".equals(a.getAccountType()) && "ACTIVE".equals(a.getStatus()))
-                .findFirst();
+        Optional<ScoutAccountEntity> observer = scoutAccountService.pickParserAccount();
         if (observer.isEmpty()) {
             return;
         }
@@ -55,23 +57,47 @@ public class AdRadarObserverWorker {
                 source.getLinkOrUsername(),
                 scoutProperties.getRadarKeywords());
         if (!result.ok() || result.hits().isEmpty()) {
+            if (!result.ok()) {
+                actionLogService.fail(account.getId(), source.getUserId(), "CHAT_SCAN",
+                        source.getLinkOrUsername(), result.error());
+            }
             return;
         }
+        int newHits = 0;
         for (ScoutSessionGateway.ChatHit hit : result.hits()) {
+            String snippet = hit.snippet() != null ? hit.snippet().trim() : "";
+            if (snippet.isEmpty()) {
+                continue;
+            }
+            if (hitRepository.existsByUserIdAndWatchSourceIdAndSnippet(
+                    source.getUserId(), source.getId(), snippet)) {
+                continue;
+            }
             AdRadarHitEntity entity = new AdRadarHitEntity();
             entity.setUserId(source.getUserId());
             entity.setWatchSourceId(source.getId());
             entity.setHitType("AD_SIGNAL");
-            entity.setSnippet(hit.snippet());
+            entity.setSnippet(snippet);
             entity.setStatus("NEW");
             hitRepository.save(entity);
+            newHits++;
+            if (source.getOwnerChannelId() != null) {
+                contentPlanService.suggestFromRadar(
+                        source.getOwnerChannelId(), snippet, hit.matchedKeyword());
+            }
         }
+        if (newHits == 0) {
+            return;
+        }
+        actionLogService.ok(account.getId(), source.getUserId(), "CHAT_SCAN",
+                source.getLinkOrUsername() + " → +" + newHits);
+        int notifyCount = newHits;
         userRepository.findById(source.getUserId()).ifPresent(user -> {
             if (user.getTelegramId() != null) {
                 messageSender.sendTextSafe(user.getTelegramId(),
                         "📡 <b>Ad Radar</b>: в " + source.getLinkOrUsername()
-                                + " найдено " + result.hits().size() + " сигнал(ов) про рекламу.\n"
-                                + "Откройте Jarvis → Ad Radar → сигналы.");
+                                + " найдено " + notifyCount + " новых сигнал(ов) про рекламу.\n"
+                                + "Откройте Pulse Ассистент → Рост и реклама → сигналы.");
             }
         });
     }
