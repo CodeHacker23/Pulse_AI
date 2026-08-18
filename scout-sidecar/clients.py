@@ -30,6 +30,7 @@ from telethon.tl.types import (
 
 import config
 import proxy_pool
+import archive as dm_archive
 
 _clients: dict[int, TelegramClient] = {}
 _lock = asyncio.Lock()
@@ -48,6 +49,7 @@ def account_type(account_id: int) -> str:
 
 
 async def disconnect_account(account_id: int) -> None:
+    dm_archive.detach(account_id)
     async with _lock:
         client = _clients.pop(account_id, None)
         if client:
@@ -92,6 +94,7 @@ async def get_client(account_id: int) -> TelegramClient:
                 f"Session not authorized: {acc.label}. Run: python scripts/login.py {account_id}"
             )
         _clients[account_id] = client
+        dm_archive.attach(account_id, client)
         return client
 
 

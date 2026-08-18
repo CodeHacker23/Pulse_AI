@@ -15,7 +15,7 @@ public final class DeepAnalysisSections {
 
     private static final String[] SECTION_IDS = {"main", "audience", "hooks", "drops", "growth"};
     private static final String[] SECTION_EMOJI = {"📌", "🎯", "🧲", "📉", "💡"};
-    private static final String[] SECTION_SHORT = {"Главное", "Аудитория", "Цепляет", "Просадки", "Идеи"};
+    private static final String[] SECTION_SHORT = {"Главное", "Аудитория", "Цепляет", "Просадки", "Что публиковать"};
 
     private DeepAnalysisSections() {
     }

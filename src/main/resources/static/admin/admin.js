@@ -22,6 +22,7 @@
     PAUSED: "Пауза",
     WARMING: "Прогрев",
     FLOOD: "Флуд",
+    FLOOD_WAIT: "Карантин",
     BANNED: "Бан",
     RUNNING: "Идёт",
     SENT: "Отправлено",
@@ -189,7 +190,7 @@
     const s = String(status || "").toUpperCase();
     let cls = "warn";
     if (["ACTIVE", "RUNNING", "OK", "SUCCESS", "HOT", "WARM"].includes(s)) cls = "ok";
-    if (["PAUSED", "BANNED", "FLOOD", "ERROR", "FAILED", "INVALID", "DEAD", "BURNED"].includes(s)) cls = "bad";
+    if (["PAUSED", "BANNED", "FLOOD", "FLOOD_WAIT", "ERROR", "FAILED", "INVALID", "DEAD", "BURNED"].includes(s)) cls = "bad";
     if (["COLD", "PENDING", "WARMING"].includes(s)) cls = "info";
     const label = STATUS_RU[s] || s;
     return `<span class="status-pill ${cls}">${esc(label)}</span>`;
@@ -232,6 +233,10 @@
     if (isBurned(a)) {
       return `${db} <span class="status-pill bad" title="Ключ убит Telegram — нужен новый tdata">ключ мёртв</span>`;
     }
+    if (a.inQuarantine || String(a.status || "").toUpperCase() === "FLOOD_WAIT") {
+      const until = a.quarantineUntil ? esc(String(a.quarantineUntil).replace("T", " ").slice(0, 16)) : "?";
+      return `${db} <span class="status-pill bad" title="После FLOOD нельзя ACTIVE до конца карантина">до ${until}</span>`;
+    }
     if (a.tgAuthorized === true) {
       return `${db} <span class="status-pill ok">TG в сети</span>`;
     }
@@ -260,6 +265,7 @@
         ${["SENDER","OUTREACH"].includes(String(a.accountType||"").toUpperCase())
           ? `<button type="button" class="btn btn-sm" data-act="spambot" data-id="${a.id}">SpamBot ${a.spambotToday ?? 0}/${a.spambotMax ?? 4}</button>`
           : `<button type="button" class="btn btn-sm" data-act="enroll" data-id="${a.id}">В пул групп</button>`}
+        ${dead ? "" : `<button type="button" class="btn btn-sm" data-act="backfill" data-id="${a.id}">Архив ЛС</button>`}
         <button type="button" class="btn btn-sm" data-act="rotate" data-id="${a.id}">Сменить прокси</button>
         <button type="button" class="btn btn-sm" data-act="burn" data-id="${a.id}">В мёртвые</button>`}
         <button type="button" class="btn btn-sm" data-act="wipe" data-id="${a.id}" title="Снести .session под новый tdata">Сбросить сессию</button>
@@ -548,7 +554,7 @@
         <div class="tg-avatar" style="background:${avatarColor(r.peer_id)}">${esc(initials(title))}</div>
         <div class="tg-dialog-body">
           <div class="name"><span>${esc(title)}</span><span class="tg-dialog-time">${esc(fmtDialogTime(r.date))}</span></div>
-          <div class="preview">${esc(r.last_message || kindRu(r.kind) || "—")}</div>
+          <div class="preview">${esc(r.last_message || kindRu(r.kind) || "—")}${r.from_archive ? " · архив" : ""}</div>
         </div>
         ${unread ? `<span class="badge">${unread}</span>` : `<span class="badge badge-empty"></span>`}
       </button>`;
@@ -559,7 +565,14 @@
     const d = await api(`/admin/api/dialogs?accountId=${accountId}&limit=80`);
     if (!d.ok) throw new Error(d.error || "не удалось загрузить чаты");
     state.dialogs = d.dialogs || [];
+    state.inboxSource = d.source || "live";
     renderDialogs(state.dialogs);
+    const badge = $("chat-archive-badge");
+    if (badge) {
+      const fromArchive = d.source === "archive";
+      badge.classList.toggle("hidden", !fromArchive);
+      badge.title = fromArchive ? (d.liveError || "сессия недоступна") : "";
+    }
   }
 
   async function loadInboxCabinet() {
@@ -801,22 +814,68 @@
       method: "POST",
       json: { accountId, peer: state.peer, limit: 50 },
     });
+    const fromArchive = d.source === "archive";
+    const archBadge = $("chat-archive-badge");
+    if (archBadge) {
+      archBadge.classList.toggle("hidden", !fromArchive);
+      archBadge.title = fromArchive ? (d.liveError || "сессия недоступна") : "";
+    }
+    if (fromArchive) {
+      $("reply-form").classList.add("hidden");
+    }
     if (!d.ok) {
       $("chat-messages").innerHTML = `<div class="tg-empty error">${esc(d.error || "не удалось")}</div>`;
       return;
     }
     const msgs = d.messages || [];
     if (!msgs.length) {
-      $("chat-messages").innerHTML = `<div class="tg-empty">Сообщений нет — можно написать первым</div>`;
+      $("chat-messages").innerHTML = `<div class="tg-empty">${fromArchive
+        ? "В архиве пусто — пока сессия жива, сообщения копируются сами"
+        : "Сообщений нет — можно написать первым"}</div>`;
       return;
     }
     $("chat-messages").classList.remove("muted");
-    $("chat-messages").innerHTML = msgs.map((m) => `
-      <div class="bubble ${m.out || m.from_me ? "out" : "in"}">
-        ${esc(m.text || "—")}
-        <span class="meta">${esc(fmtDialogTime(m.date) || m.date || "")}</span>
-      </div>`).join("");
+    $("chat-messages").innerHTML = msgs.map((m) => {
+      const cls = [m.out || m.from_me ? "out" : "in", m.deleted ? "deleted" : ""].filter(Boolean).join(" ");
+      const metaBits = [fmtDialogTime(m.date) || m.date || ""];
+      if (m.edited) metaBits.push("изм.");
+      if (m.deleted) metaBits.push("удалено");
+      let mediaHtml = "";
+      if (m.hasMedia && m.mediaUrl) {
+        const src = withToken(m.mediaUrl);
+        const kind = String(m.mediaKind || "");
+        if (kind === "photo" || (m.mediaMime || "").startsWith("image/")) {
+          mediaHtml = `<a href="${esc(src)}" target="_blank" rel="noopener"><img class="tg-arch-media" src="${esc(src)}" alt=""/></a>`;
+        } else if (kind === "video" || (m.mediaMime || "").startsWith("video/")) {
+          mediaHtml = `<video class="tg-arch-media" controls src="${esc(src)}"></video>`;
+        } else if (kind === "voice" || kind === "audio" || (m.mediaMime || "").startsWith("audio/")) {
+          mediaHtml = `<audio controls src="${esc(src)}"></audio>`;
+        } else {
+          const label = esc(m.mediaFileName || "файл");
+          mediaHtml = `<a class="tg-arch-file" href="${esc(src)}" target="_blank" rel="noopener">📎 ${label}</a>`;
+        }
+      } else if (m.mediaKind && !m.text) {
+        mediaHtml = `<div class="muted">вложение (${esc(m.mediaKind)}) — файл не сохранён</div>`;
+      }
+      const textHtml = m.text ? `<div class="tg-arch-text">${esc(m.text)}</div>` : "";
+      return `
+      <div class="bubble ${cls}">
+        ${mediaHtml}${textHtml}
+        <span class="meta">${esc(metaBits.join(" · "))}</span>
+      </div>`;
+    }).join("");
     $("chat-messages").scrollTop = $("chat-messages").scrollHeight;
+  }
+
+  function withToken(path) {
+    try {
+      const u = new URL(path, window.location.origin);
+      if (state.token) u.searchParams.set("token", state.token);
+      return u.pathname + u.search;
+    } catch (_) {
+      const join = path.includes("?") ? "&" : "?";
+      return state.token ? `${path}${join}token=${encodeURIComponent(state.token)}` : path;
+    }
   }
 
   async function markDialogRead() {
@@ -986,6 +1045,7 @@
         `${r.detail || "В пуле"}\nчатов ACTIVE: ${pool.chatsActive ?? "?"} · PENDING: ${pool.pending ?? "?"} · JOINED: ${pool.joined ?? "?"}\n\n${lines}`;
       toast(r.detail || "В пуле — join сам ~30с");
       await refreshChatPoolStats();
+      await loadChatMatrix();
     } catch (e) {
       toast(e.message, true);
       $("chat-import-result").textContent = e.message || String(e);
@@ -999,11 +1059,98 @@
     if (!el) return;
     try {
       const p = await api("/admin/api/chats/pool");
-      el.textContent = `Пул: ${p.chatsActive ?? 0} чатов · очередь ${p.pending ?? 0} · вступили ${p.joined ?? 0} · ошибок ${p.failed ?? 0} · интервал ${p.joinIntervalSec ?? 30}с`;
+      const warn = p.needMoreWatchers
+        ? ` · ⚠ живых парсеров ${p.liveWatchers ?? 0}/${p.minWatchers ?? 2}`
+        : ` · парсеров ${p.liveWatchers ?? 0}`;
+      el.textContent = `Пул: ${p.chatsActive ?? 0} чатов · очередь ${p.pending ?? 0} · вступили ${p.joined ?? 0} · ошибок ${p.failed ?? 0} · интервал ${p.joinIntervalSec ?? 30}с · join ≤${p.joinLimitPerDay ?? 60}/сутки${warn}`;
     } catch (_) { /* ignore */ }
   }
-  $("chat-pool-refresh")?.addEventListener("click", () => refreshChatPoolStats());
+
+  function cellEnrolled(status) {
+    const s = String(status || "").toUpperCase();
+    return s === "PENDING" || s === "JOINING" || s === "JOINED" || s === "FAILED";
+  }
+
+  function cellLabel(status) {
+    const s = String(status || "").toUpperCase();
+    if (s === "JOINED") return "вступил";
+    if (s === "PENDING") return "очередь";
+    if (s === "JOINING") return "сейчас";
+    if (s === "FAILED") return "ошибка";
+    if (s === "LEFT") return "снят";
+    return "";
+  }
+
+  async function loadChatMatrix() {
+    const el = $("chat-matrix");
+    if (!el) return;
+    try {
+      const d = await api("/admin/api/chats/matrix");
+      const watchers = d.watchers || [];
+      const chats = d.chats || [];
+      const cells = d.cells || {};
+      if (!watchers.length) {
+        el.innerHTML = `<p class="muted">Нет PARSER/OBSERVER — заведи наблюдателя</p>`;
+        return;
+      }
+      if (!chats.length) {
+        el.innerHTML = `<p class="muted">Пул пуст — сначала «В пул + очередь»</p>`;
+        return;
+      }
+      const head = `<table class="matrix"><thead><tr><th class="sticky">Чат</th>${
+        watchers.map((w) => `<th>#${w.id}<br><span class="muted">${esc(w.label)}</span><br><span class="mono">${w.joinsToday ?? 0}/${d.joinLimitPerDay ?? 60}</span></th>`).join("")
+      }</tr></thead><tbody>`;
+      const body = chats.map((c) => {
+        const title = c.title || c.link || ("#" + c.id);
+        const tds = watchers.map((w) => {
+          const st = cells[`${c.id}:${w.id}`] || "";
+          const on = cellEnrolled(st);
+          const burned = String(w.status || "").toUpperCase() === "BURNED"
+            || String(w.status || "").toUpperCase() === "BANNED";
+          return `<td class="matrix-cell">
+            <label class="matrix-check">
+              <input type="checkbox" data-chat="${c.id}" data-acc="${w.id}" ${on ? "checked" : ""} ${burned ? "disabled" : ""} />
+              <span class="cell-st cell-st-${esc(st.toLowerCase() || "none")}">${esc(cellLabel(st))}</span>
+            </label>
+          </td>`;
+        }).join("");
+        return `<tr><td class="sticky mono" title="${esc(c.link || "")}">${esc(title)}</td>${tds}</tr>`;
+      }).join("");
+      el.innerHTML = head + body + "</tbody></table>";
+    } catch (e) {
+      el.innerHTML = `<p class="error">${esc(e.message)}</p>`;
+    }
+  }
+  $("chat-pool-refresh")?.addEventListener("click", () => {
+    refreshChatPoolStats();
+    loadChatMatrix();
+  });
+  $("chat-matrix-refresh")?.addEventListener("click", () => loadChatMatrix());
   refreshChatPoolStats();
+  loadChatMatrix();
+
+  $("chat-matrix")?.addEventListener("change", async (ev) => {
+    const inp = ev.target.closest("input[type=checkbox][data-chat][data-acc]");
+    if (!inp) return;
+    const chatId = Number(inp.dataset.chat);
+    const accountId = Number(inp.dataset.acc);
+    const enrolled = inp.checked;
+    try {
+      inp.disabled = true;
+      const r = await api("/admin/api/chats/membership", {
+        method: "POST",
+        json: { chatId, accountId, enrolled },
+      });
+      toast(r.ok === false ? (r.error || "не вышло") : (r.detail || "Ок"), r.ok === false);
+      await loadChatMatrix();
+      await refreshChatPoolStats();
+    } catch (e) {
+      toast(e.message, true);
+      inp.checked = !enrolled;
+    } finally {
+      inp.disabled = false;
+    }
+  });
 
   $("chat-import-file").addEventListener("change", async (ev) => {
     const file = ev.target.files?.[0];
@@ -1154,6 +1301,24 @@
         if (act === "enroll") {
           const r = await api(`/admin/api/accounts/${id}/enroll-pool`, { method: "POST" });
           toast(r.ok === false ? (r.error || "не вышло") : (r.detail || "Ок"), r.ok === false);
+          await refreshChatPoolStats();
+          await loadChatMatrix();
+          return;
+        }
+        if (act === "backfill") {
+          const r = await api(`/admin/api/accounts/${id}/archive-backfill`, {
+            method: "POST",
+            json: { force: true },
+          });
+          const started = r.started === true;
+          const msg = started
+            ? "Бэкфилл архива запущен"
+            : (r.reason === "already running"
+              ? "Уже качает историю"
+              : r.reason === "recent"
+                ? "Недавно уже было — жми ещё раз через неделю или force"
+                : (r.error || r.reason || "не стартовал"));
+          toast(r.ok === false ? (r.error || "не вышло") : msg, r.ok === false || (!started && r.reason !== "already running"));
           return;
         }
         const map = {
@@ -1384,6 +1549,23 @@
       state.inboxAccountId = accountId;
       await loadDialogsForAccount(accountId);
       toast(`Чатов: ${state.dialogs.length}`);
+    } catch (e) { toast(e.message, true); }
+  });
+
+  $("inbox-backfill")?.addEventListener("click", async () => {
+    const accountId = Number($("inbox-account").value);
+    if (!accountId) return toast("Выбери скаута", true);
+    try {
+      const r = await api(`/admin/api/accounts/${accountId}/archive-backfill`, {
+        method: "POST",
+        json: { force: true },
+      });
+      toast(
+        r.ok === false
+          ? (r.error || "не вышло")
+          : (r.started ? "Бэкфилл запущен — обнови кабинет через минуту" : (r.reason === "already running" ? "Уже качает" : (r.error || "не стартовал"))),
+        r.ok === false
+      );
     } catch (e) { toast(e.message, true); }
   });
 

@@ -79,6 +79,10 @@ public class ChannelEntity {
     @Column(name = "content_style_prompt", columnDefinition = "TEXT")
     private String contentStylePrompt;
 
+    /** JSON профиля ЦА (токены, запросы, где парсить). См. AudienceBrief. */
+    @Column(name = "audience_brief", columnDefinition = "TEXT")
+    private String audienceBrief;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

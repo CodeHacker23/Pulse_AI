@@ -51,11 +51,9 @@ public class AdRadarHandler {
         Optional<ChannelEntity> channelOpt = userService.findActiveChannel(user);
         StringBuilder sb = new StringBuilder();
         sb.append("📡 <b>Площадки для рекламы</b>\n\n");
-        sb.append("Найду каналы, где имеет смысл купить рекламу вашего канала/оффера.\n\n");
-        sb.append("• Подберу под нишу и покажу ориентир цены\n");
-        sb.append("• Оформим сделку: формат → креатив → бриф админу\n");
-        sb.append("• Вам цена = админ + 20%\n\n");
-        sb.append("<i>Оплата через Pulse — следующий этап. Сейчас фиксируем договорённость.</i>\n\n");
+        sb.append("Сначала читаю ваши посты → кто ЦА → ищу площадки.\n\n");
+        sb.append("• Подберу каналы темы\n");
+        sb.append("• Дальше: креатив и бриф админу\n\n");
         if (channelOpt.isPresent()) {
             ChannelEntity c = channelOpt.get();
             sb.append("Фокус: «").append(TgHtml.esc(c.getTitle())).append("»");
@@ -92,12 +90,15 @@ public class AdRadarHandler {
         }
 
         StringBuilder sb = new StringBuilder();
-        sb.append("📡 <b>Площадки под «").append(TgHtml.esc(result.category())).append("»</b>\n\n");
+        sb.append("📡 <b>Площадки</b>\n");
+        if (result.audienceLine() != null && !result.audienceLine().isBlank()) {
+            sb.append("<i>").append(TgHtml.esc(result.audienceLine())).append("</i>\n\n");
+        } else {
+            sb.append("<i>запрос: ").append(TgHtml.esc(result.category())).append("</i>\n\n");
+        }
         int i = 1;
         for (ScoredPlacement sp : result.placements()) {
             AdPlacementEntity p = sp.placement();
-            int price = sp.estimatedPriceRub();
-            int client = AdDealService.clientPrice(price);
             sb.append(i++).append(". <b>@").append(TgHtml.esc(p.getTargetUsername())).append("</b>");
             if (p.getTargetTitle() != null) {
                 sb.append(" — ").append(TgHtml.esc(shorten(p.getTargetTitle(), 40)));
@@ -107,13 +108,16 @@ public class AdRadarHandler {
                 sb.append("   👥 ~").append(formatNum(sp.subscribersHint()));
             }
             if (p.getAvgViews() != null && p.getAvgViews() > 0) {
-                sb.append(" · 👁 ~").append(formatNum(p.getAvgViews()));
+                if (sp.subscribersHint() > 0) {
+                    sb.append(" · ");
+                } else {
+                    sb.append("   ");
+                }
+                sb.append("👁 ~").append(formatNum(p.getAvgViews()));
             }
-            sb.append(" · 💰 ~").append(formatNum(client)).append(" ₽")
-                    .append(" <i>(вы, +20%)</i>");
-            sb.append("\n   📌 закреп: 1ч / 24ч / без — уточним\n\n");
+            sb.append("\n\n");
         }
-        sb.append("Нажмите канал → креатив или интерес к размещению.");
+        sb.append("Нажмите канал — креатив или сделка.");
         editOrSend(chatId, messageId, sb.toString().trim(),
                 keyboards.adRadarMatchInline(result.placements().stream().map(ScoredPlacement::placement).toList()));
     }
@@ -124,13 +128,6 @@ public class AdRadarHandler {
             messageSender.sendTextSafe(chatId, "Площадка не найдена.");
             return;
         }
-        int priceEst = AdRadarService.estimatePostPrice(null, p.getAvgViews());
-        // вытащить из notes если есть "~N ₽"
-        Integer fromNotes = parsePriceFromNotes(p.getQualityNotes());
-        if (fromNotes != null) {
-            priceEst = fromNotes;
-        }
-        int client = AdDealService.clientPrice(priceEst);
 
         StringBuilder sb = new StringBuilder();
         sb.append(AdPlacementQualityService.verdictLabel(p.getQualityVerdict()))
@@ -142,13 +139,10 @@ public class AdRadarHandler {
         if (p.getAvgViews() != null) {
             sb.append("Охват ~").append(formatNum(p.getAvgViews())).append(" просм.\n");
         }
-        sb.append("Ориентир поста: ~").append(formatNum(priceEst)).append(" ₽ админу\n");
-        sb.append("Вам через Pulse: ~<b>").append(formatNum(client)).append(" ₽</b> (+20%)\n");
-        sb.append("Закреп: <b>1 час / 24 часа / без</b> — согласуем с админом\n");
         if (p.getQualityNotes() != null) {
             sb.append("\n<i>").append(TgHtml.esc(shorten(p.getQualityNotes(), 200))).append("</i>\n");
         }
-        sb.append("\n<i>Дальше: оформить сделку (формат, креатив, бриф админу).</i>");
+        sb.append("\n<i>Дальше: оформить сделку или только креатив.</i>");
         editOrSend(chatId, messageId, sb.toString().trim(), keyboards.adRadarPlacementCardInline(p.getId()));
     }
 
@@ -287,21 +281,6 @@ public class AdRadarHandler {
         } else {
             showMenu(chatId, messageId, user);
         }
-    }
-
-    private static Integer parsePriceFromNotes(String notes) {
-        if (notes == null) {
-            return null;
-        }
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("~(\\d+)\\s*₽").matcher(notes);
-        if (m.find()) {
-            try {
-                return Integer.parseInt(m.group(1));
-            } catch (NumberFormatException ignored) {
-                return null;
-            }
-        }
-        return null;
     }
 
     private static String formatNum(int n) {

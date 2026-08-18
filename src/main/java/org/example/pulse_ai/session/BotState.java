@@ -12,6 +12,7 @@ public enum BotState {
     VIEW_POSTS,
     POST_PREVIEW,
     POST_EDIT,
+    POST_PHOTO_WAIT,
     POST_CONFIRM,
     PRODUCT_PREVIEW,
     PRODUCT_EDIT,

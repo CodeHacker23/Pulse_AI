@@ -140,18 +140,19 @@ public class TgstatApiClient {
         }
         try {
             JsonNode r = callOk("/channels/search",
-                    "q=" + enc(q) + "&country=" + enc("Россия") + "&limit=" + Math.min(Math.max(limit, 5), 50));
+                    "q=" + enc(q) + "&country=ru&limit=" + Math.min(Math.max(limit, 5), 50));
             if (r == null) {
                 // fallback: иногда ниша передаётся как category
                 r = callOk("/channels/search",
-                        "category=" + enc(q) + "&country=" + enc("Россия") + "&limit=" + Math.min(Math.max(limit, 5), 50));
+                        "category=" + enc(q) + "&country=ru&limit=" + Math.min(Math.max(limit, 5), 50));
             }
             if (r == null) {
                 return List.of();
             }
             List<NicheComparison.Peer> peers = new ArrayList<>();
             for (JsonNode item : r.path("items")) {
-                if (!"channel".equals(item.path("peer_type").asText())) {
+                String pt = item.path("peer_type").asText();
+                if (!pt.isBlank() && !"channel".equals(pt) && !"chat".equals(pt) && !"group".equals(pt)) {
                     continue;
                 }
                 String uname = item.path("username").asText("").replace("@", "");
@@ -185,7 +186,7 @@ public class TgstatApiClient {
         String me = ExternalScrapeSupport.normalizeUsername(myUsername);
         try {
             JsonNode r = callOk("/channels/search",
-                    "category=" + enc(category) + "&country=" + enc("Россия") + "&limit=100");
+                    "category=" + enc(category) + "&country=ru&limit=100");
             if (r == null) {
                 return Optional.empty();
             }

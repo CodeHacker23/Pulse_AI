@@ -17,7 +17,7 @@ class AnalyticsServiceTest {
 
     @Test
     void computesAverageViewsFromPosts() {
-        AnalyticsService service = new AnalyticsService(null, properties(10));
+        AnalyticsService service = new AnalyticsService(null, null, properties(10));
         List<ChannelPostEntity> posts = List.of(
                 post("Пост 1", 1000, "2026-06-01"),
                 post("Пост 2", 3000, "2026-06-15"),

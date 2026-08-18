@@ -38,15 +38,16 @@ public final class ConversionCopy {
     public static String ideasIntro(String channelTitle, boolean freeTier, int draftsLeft) {
         StringBuilder sb = new StringBuilder();
         sb.append("💡 <b>Что публиковать — «").append(TgHtml.esc(channelTitle)).append("»</b>\n\n");
-        sb.append("<i>Три сильнейшие темы по вашим топ-постам. Выберите одну — сгенерирую готовый текст.</i>\n\n");
+        sb.append("Жмите <b>Пост N</b> — сразу готовый текст. Потом «🚀 В эфир».\n");
+        sb.append("<i>✓ уже брали · ✅ уже в канале</i>\n");
         if (freeTier) {
-            sb.append("✍️ Бесплатных генераций: <b>").append(draftsLeft).append(" из 3</b>");
+            sb.append("\n✍️ Бесплатных генераций: <b>").append(draftsLeft).append(" из 3</b>");
         }
         return sb.toString();
     }
 
     public static String ideaBlock(int number, String title, String reason, String format, String day) {
-        return ideaBlock(number, title, reason, format, day, null, null);
+        return ideaBlock(number, title, reason, format, day, null, null, null);
     }
 
     public static String ideaBlock(
@@ -58,8 +59,25 @@ public final class ConversionCopy {
             String closesGap,
             String cta
     ) {
+        return ideaBlock(number, title, reason, format, day, closesGap, cta, null);
+    }
+
+    public static String ideaBlock(
+            int number,
+            String title,
+            String reason,
+            String format,
+            String day,
+            String closesGap,
+            String cta,
+            String usedStatus
+    ) {
         StringBuilder sb = new StringBuilder();
-        sb.append(TgHtml.b(number + ". " + TextHumanizer.humanize(title))).append("\n\n");
+        String usedMark = usedIdeaPrefix(usedStatus);
+        sb.append(TgHtml.b(usedMark + number + ". " + TextHumanizer.humanize(title))).append("\n\n");
+        if (usedStatus != null && !usedStatus.isBlank()) {
+            sb.append("<i>").append(usedIdeaHint(usedStatus)).append("</i>\n\n");
+        }
         if (reason != null && !reason.isBlank()) {
             sb.append(formatIdeaReason(reason)).append("\n\n");
         }
@@ -85,6 +103,30 @@ public final class ConversionCopy {
         return sb.toString();
     }
 
+    /** Префикс в заголовке идеи: пусто / ✓ / ✅ */
+    public static String usedIdeaPrefix(String status) {
+        if (status == null || status.isBlank()) {
+            return "";
+        }
+        return switch (status) {
+            case "PUBLISHED" -> "✅ ";
+            case "DRAFTED", "CHOSEN" -> "✓ ";
+            default -> "";
+        };
+    }
+
+    public static String usedIdeaHint(String status) {
+        if (status == null) {
+            return "";
+        }
+        return switch (status) {
+            case "PUBLISHED" -> "уже опубликовано";
+            case "DRAFTED" -> "уже есть черновик";
+            case "CHOSEN" -> "уже выбирали";
+            default -> "уже в работе";
+        };
+    }
+
     private static String formatIdeaReason(String reason) {
         String cleaned = TextHumanizer.humanize(reason.replace('\n', ' ').trim());
         if (cleaned.isBlank()) {
@@ -98,7 +140,11 @@ public final class ConversionCopy {
     }
 
     public static String draftHeader(String ideaTitle) {
-        return "✍️ <b>Черновик поста</b>\n<i>Идея: «" + TgHtml.esc(ideaTitle) + "»</i>";
+        return "✍️ <b>Черновик</b> · <i>" + TgHtml.esc(ideaTitle) + "</i>";
+    }
+
+    public static String draftNextStepHint() {
+        return "\n\n<i>Дальше: «🚀 В эфир» — сейчас или по слоту.</i>";
     }
 
     public static String draftPaywall() {
@@ -133,13 +179,11 @@ public final class ConversionCopy {
 
     public static String publishPreview(String channelTitle, String postText) {
         return """
-                📤 <b>Публикация в «%s»</b>
-
-                Текст поста:
+                📤 <b>«%s»</b>
 
                 %s
 
-                Опубликовать как есть?""".formatted(
+                <i>Сейчас или по расписанию?</i>""".formatted(
                 TgHtml.esc(channelTitle),
                 TgHtml.fromMarkdown(postText)).trim();
     }
@@ -175,6 +219,8 @@ public final class ConversionCopy {
                 Пришлите <b>новый текст одним сообщением</b>.
                 Можно выделить жирным/курсивом прямо в Telegram — пойму.
                 Либо пишите с <code>**жирный**</code> и <code>_курсив_</code>.
+
+                Или нажмите <b>✂️ Короче</b> — ужму текст в стиле автора, финал как был.
 
                 <i>/cancel — отмена</i>""".formatted(
                 TgHtml.fromMarkdown(currentText)).trim();

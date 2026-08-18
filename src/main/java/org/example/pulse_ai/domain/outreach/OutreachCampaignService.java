@@ -34,14 +34,13 @@ public class OutreachCampaignService {
 
     private static final ZoneId MSK = ZoneId.of("Europe/Moscow");
     private static final Pattern USERNAME = Pattern.compile("@?([a-zA-Z][a-zA-Z0-9_]{4,31})");
-    private static final Pattern GROUP_LINK = Pattern.compile(
-            "(?i)(?:https?://)?t\\.me/(\\+|joinchat/|)[\\w-]+");
 
     private final OutreachCampaignRepository campaignRepository;
     private final OutreachProspectRepository prospectRepository;
     private final OutreachMonthlyUsageRepository usageRepository;
     private final PulseOutreachProperties properties;
     private final AssistantQuotaService assistantQuotaService;
+    private final OutreachTemplateService templateService;
     private final LlmService llmService;
 
     @Transactional(readOnly = true)
@@ -117,13 +116,36 @@ public class OutreachCampaignService {
         return saved;
     }
 
+    /** Черновик кампании из ссылки на группу — парсинг потом докинет очередь. */
+    @Transactional
+    public OutreachCampaignEntity createFromGroupLink(
+            UserEntity user, Long ownerChannelId, String groupLink, String scenario
+    ) {
+        String sc = scenario != null ? scenario : "INVITE";
+        String fallback = switch (sc) {
+            case "CUSTDEV" -> "Здравствуйте, {username}! Короткий опрос (2–3 вопроса) — удобно ответить?";
+            case "OFFER" -> "Привет, {username}! Есть решение под {topic} — рассказать в двух словах?";
+            default -> "Привет, {username}! Веду канал {channel} — буду рад, если заглянете.";
+        };
+        String body = templateService.resolveBody(user.getId(), sc, fallback);
+        return createCampaign(user, ownerChannelId, sc, groupLink, body);
+    }
+
+    @Transactional(readOnly = true)
+    public List<OutreachProspectEntity> repliedProspects(Long campaignId) {
+        return prospectRepository.findTop15ByCampaignIdAndStatusOrderByRepliedAtDesc(campaignId, "REPLIED");
+    }
+
     @Transactional
     public OutreachCampaignEntity startCampaign(Long userId, Long campaignId) {
         OutreachCampaignEntity campaign = campaignRepository.findByIdAndUserId(campaignId, userId)
                 .orElseThrow(() -> new IllegalArgumentException("Кампания не найдена"));
         long pending = prospectRepository.countByCampaignIdAndStatus(campaignId, "PENDING");
-        if (pending == 0 && campaign.getSourceRef() == null) {
-            throw new IllegalStateException("Нет получателей. Добавьте @username.");
+        if (pending == 0) {
+            if (campaign.getSourceRef() != null && !campaign.getSourceRef().isBlank()) {
+                throw new IllegalStateException("В очереди никого нет. Сначала «Парсить группу».");
+            }
+            throw new IllegalStateException("Нет получателей. Добавьте @username или распарсите группу.");
         }
         if (sendsRemainingThisMonth(userId) <= 0) {
             throw new IllegalStateException(
@@ -268,11 +290,7 @@ public class OutreachCampaignService {
             if (trimmed.isEmpty()) {
                 continue;
             }
-            if (GROUP_LINK.matcher(trimmed).find() && trimmed.toLowerCase(Locale.ROOT).contains("join")) {
-                groupLink = trimmed;
-                continue;
-            }
-            if (trimmed.contains("t.me/+") || trimmed.contains("joinchat")) {
+            if (looksLikeGroupLink(trimmed)) {
                 groupLink = trimmed;
                 continue;
             }
@@ -282,6 +300,14 @@ public class OutreachCampaignService {
             }
         }
         return new ParsedSource(new ArrayList<>(usernames), groupLink);
+    }
+
+    static boolean looksLikeGroupLink(String raw) {
+        String t = raw.toLowerCase(Locale.ROOT).trim();
+        if (t.startsWith("@") && !t.contains(" ") && !t.contains("t.me")) {
+            return false;
+        }
+        return t.contains("t.me/") || t.contains("telegram.me/") || t.contains("joinchat");
     }
 
     private static String buildName(String scenario, ParsedSource parsed) {

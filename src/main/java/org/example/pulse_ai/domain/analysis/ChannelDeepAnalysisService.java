@@ -4,6 +4,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.pulse_ai.ai.LlmService;
 import org.example.pulse_ai.config.PulseAnalysisProperties;
+import org.example.pulse_ai.domain.audience.AudienceBrief;
+import org.example.pulse_ai.domain.audience.AudienceIntelService;
 import org.example.pulse_ai.persistence.entity.ChannelPostEntity;
 import org.example.pulse_ai.stats.AnalyticsService;
 import org.example.pulse_ai.stats.model.AnalysisMetrics;
@@ -39,6 +41,7 @@ public class ChannelDeepAnalysisService {
     private final LlmService llmService;
     private final AnalyticsService analyticsService;
     private final PulseAnalysisProperties analysisProperties;
+    private final AudienceIntelService audienceIntelService;
 
     public String analyzeChannel(
             Long channelId,
@@ -47,7 +50,42 @@ public class ChannelDeepAnalysisService {
             LocalDate periodFrom,
             LocalDate periodTo
     ) {
-        return analyzeChannel(channelId, channelTitle, metrics, periodFrom, periodTo, null);
+        return analyzeChannel(channelId, channelTitle, metrics, periodFrom, periodTo, null, null);
+    }
+
+    public String analyzeChannel(
+            Long channelId,
+            String channelTitle,
+            AnalysisMetrics metrics,
+            LocalDate periodFrom,
+            LocalDate periodTo,
+            String externalSummary
+    ) {
+        return analyzeChannel(channelId, channelTitle, metrics, periodFrom, periodTo, externalSummary, null);
+    }
+
+    public String analyzeChannel(
+            Long channelId,
+            String channelTitle,
+            AnalysisMetrics metrics,
+            LocalDate periodFrom,
+            LocalDate periodTo,
+            String externalSummary,
+            AudienceBrief audienceBrief
+    ) {
+        try {
+            List<ChannelPostEntity> posts = analyticsService.loadPosts(channelId, periodFrom, periodTo);
+            String prompt = buildPrompt(channelTitle, metrics, posts, externalSummary, audienceBrief);
+            return llmService.completeTextWithTimeout(
+                    SYSTEM_PROMPT,
+                    prompt,
+                    analysisProperties.getLlmTimeoutSeconds(),
+                    3500
+            );
+        } catch (Exception ex) {
+            log.warn("Deep LLM analysis failed, using fallback: {}", ex.getMessage());
+            return fallbackAnalysis(channelTitle, metrics);
+        }
     }
 
     public boolean needsSparseAnalysis(AnalysisMetrics metrics, int subscribers) {
@@ -92,30 +130,13 @@ public class ChannelDeepAnalysisService {
                 """.formatted(channelTitle, postsLine, subsLine).trim();
     }
 
-    public String analyzeChannel(
-            Long channelId,
+    private String buildPrompt(
             String channelTitle,
             AnalysisMetrics metrics,
-            LocalDate periodFrom,
-            LocalDate periodTo,
-            String externalSummary
+            List<ChannelPostEntity> posts,
+            String externalSummary,
+            AudienceBrief audienceBrief
     ) {
-        try {
-            List<ChannelPostEntity> posts = analyticsService.loadPosts(channelId, periodFrom, periodTo);
-            String prompt = buildPrompt(channelTitle, metrics, posts, externalSummary);
-            return llmService.completeTextWithTimeout(
-                    SYSTEM_PROMPT,
-                    prompt,
-                    analysisProperties.getLlmTimeoutSeconds(),
-                    3500
-            );
-        } catch (Exception ex) {
-            log.warn("Deep LLM analysis failed, using fallback: {}", ex.getMessage());
-            return fallbackAnalysis(channelTitle, metrics);
-        }
-    }
-
-    private String buildPrompt(String channelTitle, AnalysisMetrics metrics, List<ChannelPostEntity> posts, String externalSummary) {
         StringBuilder topPosts = new StringBuilder();
         for (PostMetric post : metrics.topPosts()) {
             topPosts.append("• ").append(post.title())
@@ -155,6 +176,9 @@ public class ChannelDeepAnalysisService {
         String externalBlock = (externalSummary != null && !externalSummary.isBlank())
                 ? "\n\n🌐 Данные с внешних площадок (TGStat/Telemetr/Telega.in):\n" + externalSummary
                 : "";
+        String audienceBlock = audienceBrief != null
+                ? "\n\n" + audienceIntelService.promptBlock(audienceBrief)
+                : "";
 
         return """
                 Сделай полный разбор Telegram-канала «%s» за период.
@@ -173,7 +197,7 @@ public class ChannelDeepAnalysisService {
                 %s
 
                 📝 Фрагменты постов для анализа стиля:
-                %s%s
+                %s%s%s
 
                 ВАЖНО про рекламу: посты с меткой [РЕПОСТ ИЗ ДРУГОГО КАНАЛА] или [ВОЗМОЖНО РЕКЛАМА],
                 а также те, что по смыслу НЕ относятся к тематике канала (чужой продукт, посев, реф-ссылки) — это НЕ контент канала.
@@ -184,7 +208,9 @@ public class ChannelDeepAnalysisService {
 
                 📌 **Главное** — 2-3 предложения: сильная сторона канала и главная точка роста.
 
-                🎯 **О чём канал и кто аудитория** — тематика, позиционирование, что человек хочет здесь получить.
+                🎯 **О чём канал и кто аудитория** — роль читателя (профессия / жизненная ситуация), не ярлык каталога.
+                Запрещено сводить канал к одному слову «бизнес» / «новости», если в постах видна конкретная роль.
+                Пиши только то, что следует из фрагментов постов. Если мало данных — так и скажи.
 
                 🧲 **Почему цепляет (или нет)** — на примерах топ-постов: какие психологические крючки сработали
                 (любопытство, выгода, эмоция, соц. доказательство). На слабых (нерекламных) постах — чего не хватило.
@@ -205,7 +231,8 @@ public class ChannelDeepAnalysisService {
                 blankIfEmpty(topPosts),
                 blankIfEmpty(weakPosts),
                 blankIfEmpty(samples),
-                externalBlock
+                externalBlock,
+                audienceBlock
         );
     }
 

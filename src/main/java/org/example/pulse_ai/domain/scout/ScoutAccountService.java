@@ -8,7 +8,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 
@@ -21,6 +23,8 @@ public class ScoutAccountService {
     private static final Set<String> PARSER_TYPES = Set.of("OBSERVER", "PARSER");
     /** SpamBot чаще 4×/сутки только раздражает антиспам TG. */
     public static final int SPAMBOT_DAILY_MAX = 4;
+    /** После FLOOD не ACTIVE, пока не истечёт карантин (минуты). */
+    public static final int FLOOD_QUARANTINE_MIN = 120;
 
     private final ScoutAccountRepository accountRepository;
     private final ScoutSessionGateway scoutGateway;
@@ -81,11 +85,12 @@ public class ScoutAccountService {
                 return;
             }
             account.setLastError(error);
-            boolean flood = error != null && (error.contains("FLOOD") || error.contains("PEER_FLOOD")
-                    || error.contains("BANNED") || error.toLowerCase().contains("spam"));
+            boolean flood = error != null && (error.toUpperCase(Locale.ROOT).contains("FLOOD")
+                    || error.toUpperCase(Locale.ROOT).contains("PEER_FLOOD")
+                    || error.toUpperCase(Locale.ROOT).contains("BANNED")
+                    || error.toLowerCase(Locale.ROOT).contains("spam"));
             if (flood) {
-                account.setStatus("FLOOD_WAIT");
-                accountRepository.save(account);
+                enterQuarantine(account, FLOOD_QUARANTINE_MIN, error);
                 // SpamBot имеет смысл только у писателей. PARSER/OBSERVER не пишут ЛС.
                 if (isSenderType(account.getAccountType())) {
                     recoverFromFlood(account);
@@ -94,6 +99,72 @@ public class ScoutAccountService {
                 accountRepository.save(account);
             }
         });
+    }
+
+    /**
+     * Карантин после FLOOD: статус {@code FLOOD_WAIT} до {@code quarantineUntil}.
+     * Join/рассылка не берут акк; «Старт» в ACTIVE заблокирован до конца таймера.
+     */
+    @Transactional
+    public void enterQuarantine(long accountId, int minutes, String reason) {
+        accountRepository.findById(accountId).ifPresent(a -> enterQuarantine(a, minutes, reason));
+    }
+
+    private void enterQuarantine(ScoutAccountEntity account, int minutes, String reason) {
+        Instant until = Instant.now().plus(Math.max(1, minutes), ChronoUnit.MINUTES);
+        Instant existing = account.getQuarantineUntil();
+        if (existing != null && existing.isAfter(until)) {
+            until = existing;
+        }
+        account.setStatus("FLOOD_WAIT");
+        account.setQuarantineUntil(until);
+        if (reason != null && !reason.isBlank()) {
+            String msg = "карантин до " + until + " · " + reason;
+            account.setLastError(msg.length() > 500 ? msg.substring(0, 500) : msg);
+        }
+        accountRepository.save(account);
+        actionLogService.log(account.getId(), null, "QUARANTINE", "OK",
+                minutes + "м · " + until, reason);
+        log.info("Scout #{} → FLOOD_WAIT until {}", account.getId(), until);
+    }
+
+    public boolean isInQuarantine(ScoutAccountEntity account) {
+        if (account == null) {
+            return false;
+        }
+        Instant until = account.getQuarantineUntil();
+        return until != null && until.isAfter(Instant.now());
+    }
+
+    /** Снять истёкший карантин → ACTIVE (или оставить BURNED/PAUSED). */
+    @Transactional
+    public int releaseExpiredQuarantines() {
+        Instant now = Instant.now();
+        int n = 0;
+        for (ScoutAccountEntity account : accountRepository.findAll()) {
+            Instant until = account.getQuarantineUntil();
+            if (until == null || until.isAfter(now)) {
+                continue;
+            }
+            String st = String.valueOf(account.getStatus()).toUpperCase(Locale.ROOT);
+            if ("BURNED".equals(st) || "BANNED".equals(st) || "PAUSED".equals(st)) {
+                account.setQuarantineUntil(null);
+                accountRepository.save(account);
+                continue;
+            }
+            if ("FLOOD_WAIT".equals(st) || "WARMING".equals(st)) {
+                account.setStatus("ACTIVE");
+                account.setQuarantineUntil(null);
+                account.setLastError(null);
+                accountRepository.save(account);
+                actionLogService.log(account.getId(), null, "QUARANTINE", "DONE", "released → ACTIVE", null);
+                n++;
+            } else {
+                account.setQuarantineUntil(null);
+                accountRepository.save(account);
+            }
+        }
+        return n;
     }
 
     /**
@@ -139,8 +210,14 @@ public class ScoutAccountService {
                             + (spam.detail() != null ? (" · " + spam.detail()) : ""),
                     spam.error());
             if (spam.ok()) {
-                account.setStatus("ACTIVE");
-                account.setLastError("recovered via SpamBot: " + spam.detail());
+                // Не выходим из карантина раньше времени — SpamBot только диагностирует.
+                if (!isInQuarantine(account)) {
+                    account.setStatus("ACTIVE");
+                    account.setQuarantineUntil(null);
+                    account.setLastError("recovered via SpamBot: " + spam.detail());
+                } else {
+                    account.setLastError("SpamBot ok, карантин до " + account.getQuarantineUntil());
+                }
             }
             accountRepository.save(account);
             if (spam.ok()) {
@@ -243,9 +320,24 @@ public class ScoutAccountService {
         setStatus(accountId, "PAUSED");
     }
 
+    /**
+     * @return null если ок, иначе причина отказа
+     */
     @Transactional
-    public void resume(long accountId) {
-        setStatus(accountId, "ACTIVE");
+    public String resume(long accountId) {
+        var found = accountRepository.findById(accountId);
+        if (found.isEmpty()) {
+            return "аккаунт не найден";
+        }
+        ScoutAccountEntity account = found.get();
+        if (isInQuarantine(account)) {
+            return "Карантин после FLOOD до " + account.getQuarantineUntil()
+                    + " — нельзя ACTIVE раньше";
+        }
+        account.setStatus("ACTIVE");
+        account.setQuarantineUntil(null);
+        accountRepository.save(account);
+        return null;
     }
 
     /** Ключ убит Telegram — в работу не берём, но карточку и данные покупки храним. */

@@ -3,7 +3,9 @@ package org.example.pulse_ai.domain.scout;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.pulse_ai.domain.outreach.OutreachCampaignService;
+import org.example.pulse_ai.keyboard.KeyboardFactory;
 import org.example.pulse_ai.persistence.entity.GroupParseJobEntity;
+import org.example.pulse_ai.persistence.entity.OutreachCampaignEntity;
 import org.example.pulse_ai.persistence.entity.UserEntity;
 import org.example.pulse_ai.persistence.repository.GroupParseJobRepository;
 import org.example.pulse_ai.persistence.repository.UserRepository;
@@ -30,6 +32,7 @@ public class GroupMemberParseService {
     private final ScoutActionLogService actionLogService;
     private final UserRepository userRepository;
     private final TelegramMessageSender messageSender;
+    private final KeyboardFactory keyboards;
 
     @Transactional
     public GroupParseJobEntity queueParse(Long userId, Long campaignId, String groupLink) {
@@ -56,7 +59,7 @@ public class GroupMemberParseService {
         var accountOpt = scoutAccountService.pickParserAccount();
         if (accountOpt.isEmpty()) {
             fail(job, "Нет PARSER/OBSERVER-аккаунта. Sender'ы не парсят — добавьте scout PARSER.");
-            notifyOwner(job, "⚠️ Парсинг не стартовал: нет PARSER-аккаунта в sidecar.");
+            notifyOwner(job, "⚠️ Парсинг не стартовал: нет живого парсера. Напишите в поддержку.", null);
             return;
         }
 
@@ -72,7 +75,7 @@ public class GroupMemberParseService {
             actionLogService.fail(accountOpt.get().getId(), job.getUserId(), "GROUP_PARSE",
                     job.getGroupLink(), result.error());
             fail(job, result.error());
-            notifyOwner(job, "⚠️ Парсинг не удался: " + humanizeParseError(result.error()));
+            notifyOwner(job, "⚠️ Парсинг не удался: " + humanizeParseError(result.error()), null);
             return;
         }
 
@@ -81,7 +84,22 @@ public class GroupMemberParseService {
         long warm = users.stream().filter(u -> "warm".equals(u.tier())).count();
 
         int added = 0;
-        if (job.getCampaignId() != null) {
+        Long campaignId = job.getCampaignId();
+        if (campaignId == null) {
+            UserEntity owner = userRepository.findById(job.getUserId()).orElse(null);
+            if (owner != null) {
+                try {
+                    OutreachCampaignEntity created = campaignService.createFromGroupLink(
+                            owner, null, job.getGroupLink(), "INVITE");
+                    campaignId = created.getId();
+                    job.setCampaignId(campaignId);
+                    jobRepository.save(job);
+                } catch (Exception ex) {
+                    log.warn("parse job #{} auto-campaign failed: {}", job.getId(), ex.getMessage());
+                }
+            }
+        }
+        if (campaignId != null) {
             StringBuilder sb = new StringBuilder();
             for (ScoutSessionGateway.AudienceMember u : users) {
                 if (sb.length() > 0) {
@@ -90,12 +108,12 @@ public class GroupMemberParseService {
                 sb.append('@').append(u.username());
             }
             try {
-                added = campaignService.importUsernames(job.getUserId(), job.getCampaignId(), sb.toString());
+                added = campaignService.importUsernames(job.getUserId(), campaignId, sb.toString());
             } catch (Exception ex) {
                 actionLogService.fail(accountOpt.get().getId(), job.getUserId(), "GROUP_PARSE",
                         job.getGroupLink(), ex.getMessage());
                 fail(job, ex.getMessage());
-                notifyOwner(job, "⚠️ Парсинг: ошибка импорта — " + ex.getMessage());
+                notifyOwner(job, "⚠️ Парсинг: ошибка импорта — " + ex.getMessage(), null);
                 return;
             }
         }
@@ -114,13 +132,15 @@ public class GroupMemberParseService {
                 + "«" + title + "»\n\n"
                 + "Живых с @username: <b>" + found + "</b>\n"
                 + "• hot: <b>" + hot + "</b> · warm: <b>" + warm + "</b>\n"
-                + "<i>Мёртвые, боты и без username отсеяны (score ≥ " + MIN_SCORE + ").</i>";
-        if (job.getCampaignId() != null) {
-            msg += "\n\nДобавлено в кампанию #" + job.getCampaignId() + ": <b>" + added + "</b>.";
+                + "<i>Мёртвые, боты и без username отсеяны.</i>";
+        Long doneCampaignId = job.getCampaignId();
+        if (doneCampaignId != null) {
+            msg += "\n\nВ кампании #" + doneCampaignId + ": <b>" + added + "</b>. Дальше — «Запустить».";
+            notifyOwner(job, msg, keyboards.outreachParseDoneInline(doneCampaignId));
         } else {
-            msg += "\n\nСписок можно забрать в рассылку — 📨 Рассылка → импорт @username.";
+            msg += "\n\nОткройте 📨 Рассылка и создайте кампанию.";
+            notifyOwner(job, msg, null);
         }
-        notifyOwner(job, msg);
     }
 
     private void fail(GroupParseJobEntity job, String error) {
@@ -130,9 +150,15 @@ public class GroupMemberParseService {
         jobRepository.save(job);
     }
 
-    private void notifyOwner(GroupParseJobEntity job, String text) {
-        userRepository.findById(job.getUserId()).map(UserEntity::getTelegramId).ifPresent(tgId ->
-                messageSender.sendTextSafe(tgId, text));
+    private void notifyOwner(GroupParseJobEntity job, String text,
+                             org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup keyboard) {
+        userRepository.findById(job.getUserId()).map(UserEntity::getTelegramId).ifPresent(tgId -> {
+            if (keyboard != null) {
+                messageSender.sendTextWithInlineSafe(tgId, text, keyboard);
+            } else {
+                messageSender.sendTextSafe(tgId, text);
+            }
+        });
     }
 
     static String humanizeParseError(String raw) {

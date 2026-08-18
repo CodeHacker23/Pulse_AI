@@ -1,5 +1,9 @@
 """Pulse Scout Sidecar — MTProto (Telethon) REST API for Java bot."""
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
@@ -7,9 +11,31 @@ import clients
 import config
 import proxy_pool
 import account_registry
+import archive as dm_archive
+
+log = logging.getLogger("pulse.sidecar")
 
 
-app = FastAPI(title="Pulse Scout Sidecar", version="1.3.0")
+async def _warm_archive_listeners() -> None:
+    await asyncio.sleep(1.5)
+    for acc_id in config.load_accounts():
+        try:
+            client = await clients.get_client(acc_id)
+            dm_archive.attach(acc_id, client)
+            started = dm_archive.start_backfill(acc_id, client, force=False)
+            log.info("archive listener on account %s backfill=%s", acc_id, started.get("reason") or started.get("state"))
+        except Exception as ex:
+            log.info("archive skip account %s: %s", acc_id, ex)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(_warm_archive_listeners())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="Pulse Scout Sidecar", version="1.5.0", lifespan=lifespan)
 
 
 class DmRequest(BaseModel):
@@ -76,6 +102,13 @@ class DialogReplyRequest(BaseModel):
     accountId: int
     peer: str
     text: str = Field(max_length=4096)
+
+
+class ArchiveBackfillRequest(BaseModel):
+    accountId: int
+    force: bool = False
+    maxDialogs: int = Field(default=40, ge=1, le=80)
+    maxPerDialog: int = Field(default=80, ge=1, le=120)
 
 
 class RegisterAccountRequest(BaseModel):
@@ -445,6 +478,27 @@ async def dialog_reply(body: DialogReplyRequest):
     if ok:
         return {"ok": True, "messageId": mid}
     return {"ok": False, "error": error or "reply failed"}
+
+
+@app.post("/v1/archive/backfill")
+async def archive_backfill(body: ArchiveBackfillRequest):
+    try:
+        client = await clients.get_client(body.accountId)
+        dm_archive.attach(body.accountId, client)
+        return dm_archive.start_backfill(
+            body.accountId,
+            client,
+            force=body.force,
+            max_dialogs=body.maxDialogs,
+            max_per_dialog=body.maxPerDialog,
+        )
+    except Exception as ex:
+        return {"ok": False, "error": str(ex)}
+
+
+@app.get("/v1/archive/backfill/{account_id}")
+async def archive_backfill_status(account_id: int):
+    return {"ok": True, **dm_archive.backfill_status(account_id)}
 
 
 if __name__ == "__main__":

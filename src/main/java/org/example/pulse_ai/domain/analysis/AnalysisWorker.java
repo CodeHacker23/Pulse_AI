@@ -47,6 +47,7 @@ public class AnalysisWorker {
     private final org.example.pulse_ai.stats.external.TgstatAccessService tgstatAccessService;
     private final LiveProgressService liveProgressService;
     private final ChannelProfileService channelProfileService;
+    private final org.example.pulse_ai.domain.audience.AudienceIntelService audienceIntelService;
 
     @Async
     public void runAsync(Long requestId, long chatId) {
@@ -138,6 +139,13 @@ public class AnalysisWorker {
                 log.warn("Не удалось сохранить профиль канала для request {}: {}", requestId, ex.getMessage());
             }
 
+            org.example.pulse_ai.domain.audience.AudienceBrief audienceBrief = null;
+            try {
+                audienceBrief = audienceIntelService.buildAndSave(channel);
+            } catch (Exception ex) {
+                log.warn("Audience intel skip for request {}: {}", requestId, ex.getMessage());
+            }
+
             AnalysisChartPack charts = chartRenderer.render(channel.getTitle(), metrics, errPercent, reachPercent);
 
             update(requestId, RequestStatus.GENERATING_IDEAS, (short) 65, "LLM-разбор канала");
@@ -153,7 +161,8 @@ public class AnalysisWorker {
                         metrics,
                         request.getPeriodFrom(),
                         request.getPeriodTo(),
-                        externalSummary
+                        externalSummary,
+                        audienceBrief
                 );
             }
             snapshotService.saveDeepAnalysis(requestId, deepAnalysis);

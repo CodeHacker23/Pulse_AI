@@ -11,8 +11,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -29,6 +32,10 @@ public class ScoutChatPoolService {
 
     public static final int JOIN_INTERVAL_SEC = 30;
     public static final int MAX_JOIN_ATTEMPTS = 5;
+    public static final int MAX_JOINS_PER_DAY = 60;
+    public static final int MIN_LIVE_WATCHERS = 2;
+    public static final int FLOOD_QUARANTINE_MIN = 120;
+    private static final ZoneId MSK = ZoneId.of("Europe/Moscow");
 
     private final ScoutTargetChatRepository chatRepository;
     private final ScoutChatMembershipRepository membershipRepository;
@@ -226,14 +233,47 @@ public class ScoutChatPoolService {
     }
 
     private Optional<ScoutAccountEntity> pickHealthyWatcher(long excludeId) {
+        return liveWatchers().stream()
+                .filter(a -> !a.getId().equals(excludeId))
+                .findFirst();
+    }
+
+    private List<ScoutAccountEntity> liveWatchers() {
         return accountService.listAll().stream()
                 .filter(a -> ScoutAccountService.isParserType(a.getAccountType()))
-                .filter(a -> !a.getId().equals(excludeId))
                 .filter(a -> {
                     String s = String.valueOf(a.getStatus()).toUpperCase(Locale.ROOT);
                     return "ACTIVE".equals(s) || "WARMING".equals(s);
                 })
-                .findFirst();
+                .toList();
+    }
+
+    private int joinsToday(long accountId) {
+        return (int) membershipRepository.countByScoutAccountIdAndStatusAndJoinedAtGreaterThanEqual(
+                accountId, "JOINED", startOfMoscowDay());
+    }
+
+    private void postponeAccount(long accountId, Instant when, String reason) {
+        String why = reason != null && reason.length() > 500 ? reason.substring(0, 500) : reason;
+        for (ScoutChatMembershipEntity m : membershipRepository.findByScoutAccountId(accountId)) {
+            String s = String.valueOf(m.getStatus()).toUpperCase(Locale.ROOT);
+            if (!"PENDING".equals(s) && !"FAILED".equals(s)) {
+                continue;
+            }
+            if (m.getNextAttemptAt() == null || m.getNextAttemptAt().isBefore(when)) {
+                m.setNextAttemptAt(when);
+                m.setLastError(why);
+                membershipRepository.save(m);
+            }
+        }
+    }
+
+    private static Instant startOfMoscowDay() {
+        return LocalDate.now(MSK).atStartOfDay(MSK).toInstant();
+    }
+
+    private static Instant nextMoscowMidnight() {
+        return LocalDate.now(MSK).plusDays(1).atStartOfDay(MSK).toInstant();
     }
 
     /** Один join за тик — чтобы не словить бан на массовом вступлении. */
@@ -257,6 +297,12 @@ public class ScoutChatPoolService {
                 m.setStatus("FAILED");
                 m.setLastError("account " + st);
                 membershipRepository.save(m);
+                continue;
+            }
+            int joinedToday = joinsToday(acc.getId());
+            if (joinedToday >= MAX_JOINS_PER_DAY) {
+                postponeAccount(acc.getId(), nextMoscowMidnight(),
+                        "суточный лимит join " + MAX_JOINS_PER_DAY);
                 continue;
             }
             ScoutTargetChatEntity chat = chatRepository.findById(m.getChatId()).orElse(null);
@@ -293,7 +339,10 @@ public class ScoutChatPoolService {
                     || err.toUpperCase(Locale.ROOT).contains("WAIT");
             if (flood) {
                 m.setStatus("PENDING");
-                m.setNextAttemptAt(Instant.now().plus(15, ChronoUnit.MINUTES));
+                Instant quarantine = Instant.now().plus(FLOOD_QUARANTINE_MIN, ChronoUnit.MINUTES);
+                m.setNextAttemptAt(quarantine);
+                postponeAccount(acc.getId(), quarantine, "карантин FLOOD " + FLOOD_QUARANTINE_MIN + "м");
+                accountService.enterQuarantine(acc.getId(), FLOOD_QUARANTINE_MIN, err);
             } else if (m.getAttempts() >= MAX_JOIN_ATTEMPTS) {
                 m.setStatus("FAILED");
             } else {
@@ -309,14 +358,89 @@ public class ScoutChatPoolService {
 
     @Transactional(readOnly = true)
     public Map<String, Object> stats() {
-        return Map.of(
-                "chatsActive", chatRepository.countByStatus("ACTIVE"),
-                "chatsTotal", chatRepository.count(),
-                "pending", membershipRepository.countByStatus("PENDING"),
-                "joined", membershipRepository.countByStatus("JOINED"),
-                "failed", membershipRepository.countByStatus("FAILED"),
-                "joinIntervalSec", JOIN_INTERVAL_SEC
-        );
+        List<ScoutAccountEntity> live = liveWatchers();
+        Map<String, Object> joins = new LinkedHashMap<>();
+        for (ScoutAccountEntity acc : live) {
+            joins.put(String.valueOf(acc.getId()), joinsToday(acc.getId()));
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("chatsActive", chatRepository.countByStatus("ACTIVE"));
+        out.put("chatsTotal", chatRepository.count());
+        out.put("pending", membershipRepository.countByStatus("PENDING"));
+        out.put("joined", membershipRepository.countByStatus("JOINED"));
+        out.put("failed", membershipRepository.countByStatus("FAILED"));
+        out.put("joinIntervalSec", JOIN_INTERVAL_SEC);
+        out.put("joinLimitPerDay", MAX_JOINS_PER_DAY);
+        out.put("joinsToday", joins);
+        out.put("liveWatchers", live.size());
+        out.put("minWatchers", MIN_LIVE_WATCHERS);
+        out.put("needMoreWatchers", live.size() < MIN_LIVE_WATCHERS);
+        return out;
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> matrix() {
+        List<ScoutAccountEntity> watchers = accountService.listAll().stream()
+                .filter(a -> ScoutAccountService.isParserType(a.getAccountType()))
+                .toList();
+        List<Map<String, Object>> watcherRows = new ArrayList<>();
+        for (ScoutAccountEntity a : watchers) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", a.getId());
+            row.put("label", a.getLabel());
+            row.put("status", a.getStatus());
+            row.put("joinsToday", joinsToday(a.getId()));
+            watcherRows.add(row);
+        }
+        List<Map<String, Object>> chatRows = new ArrayList<>();
+        for (ScoutTargetChatEntity c : chatRepository.findAll()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", c.getId());
+            row.put("link", c.getLink());
+            row.put("title", c.getTitle() != null ? c.getTitle() : "");
+            row.put("status", c.getStatus());
+            chatRows.add(row);
+        }
+        Map<String, String> cells = new LinkedHashMap<>();
+        for (ScoutChatMembershipEntity m : membershipRepository.findAll()) {
+            cells.put(m.getChatId() + ":" + m.getScoutAccountId(), m.getStatus());
+        }
+        Map<String, Object> out = new LinkedHashMap<>(stats());
+        out.put("ok", true);
+        out.put("watchers", watcherRows);
+        out.put("chats", chatRows);
+        out.put("cells", cells);
+        return out;
+    }
+
+    /**
+     * Галка в матрице: в очередь / снять с очереди. Из Telegram не выходим.
+     */
+    @Transactional
+    public Map<String, Object> setEnrolled(long chatId, long accountId, boolean enrolled) {
+        ScoutAccountEntity acc = accountService.find(accountId).orElse(null);
+        if (acc == null || !ScoutAccountService.isParserType(acc.getAccountType())) {
+            return Map.of("ok", false, "error", "скаут не PARSER/OBSERVER");
+        }
+        if (chatRepository.findById(chatId).isEmpty()) {
+            return Map.of("ok", false, "error", "чат не найден");
+        }
+        if (enrolled) {
+            boolean created = ensurePending(chatId, accountId);
+            return Map.of("ok", true, "enrolled", true, "changed", created,
+                    "detail", created ? "В очередь join" : "Уже в пуле / JOINED");
+        }
+        var existing = membershipRepository.findByChatIdAndScoutAccountId(chatId, accountId);
+        if (existing.isEmpty()) {
+            return Map.of("ok", true, "enrolled", false, "changed", false, "detail", "Не был в пуле");
+        }
+        ScoutChatMembershipEntity m = existing.get();
+        m.setStatus("LEFT");
+        m.setNextAttemptAt(null);
+        m.setLastError("снят с очереди в матрице");
+        membershipRepository.save(m);
+        return Map.of("ok", true, "enrolled", false, "changed", true,
+                "detail", "Снят с очереди (в TG не выходим)");
     }
 
     @Transactional(readOnly = true)

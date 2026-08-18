@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.pulse_ai.config.PulseBillingProperties;
 import org.example.pulse_ai.config.PulseImageProperties;
 import org.example.pulse_ai.domain.analysis.DeepAnalysisSections;
+import org.example.pulse_ai.domain.outreach.OutreachCampaignService;
 import org.example.pulse_ai.domain.user.UserTimezoneService;
 import org.example.pulse_ai.persistence.entity.AdPlacementEntity;
 import org.example.pulse_ai.persistence.entity.GeneratedPostEntity;
@@ -20,6 +21,7 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.Keyboard
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @Component
 @RequiredArgsConstructor
@@ -168,14 +170,12 @@ public class KeyboardFactory {
 
     public InlineKeyboardMarkup resultActionsInline(long requestId, boolean teaserMode) {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(row(button("💡 Что публиковать", CallbackData.PREFIX_RESULT + "ideas:" + requestId)));
         rows.add(row(
-                button("📊 Статистика", CallbackData.PREFIX_RESULT + "stats:" + requestId),
-                button("💡 3 идеи", CallbackData.PREFIX_RESULT + "ideas:" + requestId)
+                button("📊 Сводка", CallbackData.PREFIX_RESULT + "stats:" + requestId),
+                button("📈 Графики", CallbackData.PREFIX_RESULT + "charts:" + requestId)
         ));
-        rows.add(row(
-                button("📈 Графики", CallbackData.PREFIX_RESULT + "charts:" + requestId),
-                backToReportButton(requestId)
-        ));
+        rows.add(row(backToReportButton(requestId)));
         if (teaserMode && billingProperties.isEnabled()) {
             rows.add(row(button("🚀 Полный разбор + посты", CallbackData.PAY_SELECT)));
         }
@@ -238,15 +238,43 @@ public class KeyboardFactory {
             boolean showIdeasRegen,
             int ideasRegensLeft
     ) {
+        return ideasPageInline(
+                requestId, pageIdeaIds, globalStart, page, totalPages,
+                locked, showBatchPosts, showIdeasRegen, ideasRegensLeft, Map.of());
+    }
+
+    public InlineKeyboardMarkup ideasPageInline(
+            long requestId,
+            List<Long> pageIdeaIds,
+            int globalStart,
+            int page,
+            int totalPages,
+            boolean locked,
+            boolean showBatchPosts,
+            boolean showIdeasRegen,
+            int ideasRegensLeft,
+            Map<Long, String> ideaStatuses
+    ) {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
 
         List<InlineKeyboardButton> postRow = new ArrayList<>();
         for (int i = 0; i < pageIdeaIds.size(); i++) {
             int number = globalStart + i + 1;
-            String label = locked ? "🔒 Пост " + number : "✍️ Пост " + number;
+            Long ideaId = pageIdeaIds.get(i);
+            String used = ideaStatuses != null ? ideaStatuses.get(ideaId) : null;
+            String label;
+            if (locked) {
+                label = "🔒 " + number;
+            } else if ("PUBLISHED".equals(used)) {
+                label = "✅ " + number;
+            } else if (used != null) {
+                label = "✓ " + number;
+            } else {
+                label = "Пост " + number;
+            }
             String callback = locked
                     ? CallbackData.PREFIX_RESULT + "draftlock:" + requestId
-                    : CallbackData.PREFIX_RESULT + "draft:" + requestId + ":" + pageIdeaIds.get(i);
+                    : CallbackData.PREFIX_RESULT + "draft:" + requestId + ":" + ideaId;
             postRow.add(button(label, callback));
         }
         if (!postRow.isEmpty()) {
@@ -318,17 +346,16 @@ public class KeyboardFactory {
             int draftsLeft
     ) {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(row(button("🚀 В эфир", CallbackData.PREFIX_PUBLISH + "when:" + postId)));
         rows.add(row(
-                button("📤 Опубликовать", CallbackData.PREFIX_PUBLISH + "preview:" + postId),
-                button("✏️ Править", CallbackData.PREFIX_PUBLISH + "edit:" + postId)
+                button("✂️ Короче", CallbackData.PREFIX_PUBLISH + "tighter:" + postId),
+                button("🔄 Ещё раз", CallbackData.PREFIX_RESULT + "draft:" + requestId + ":" + ideaId)
         ));
-        if (imageProperties.isConfigured()) {
-            rows.add(row(button("🖼 Подобрать фото", CallbackData.PREFIX_PUBLISH + "photo:" + postId)));
-        }
         rows.add(row(
-                button("🔄 Другой вариант", CallbackData.PREFIX_RESULT + "draft:" + requestId + ":" + ideaId),
-                button("💡 К идеям", CallbackData.PREFIX_RESULT + "ideas:" + requestId)
+                button("✏️ Править", CallbackData.PREFIX_PUBLISH + "edit:" + postId),
+                button("🖼 Фото", CallbackData.PREFIX_PUBLISH + "photomenu:" + postId)
         ));
+        rows.add(row(button("💡 К идеям", CallbackData.PREFIX_RESULT + "ideas:" + requestId)));
         return inlineRows(rows);
     }
 
@@ -353,13 +380,25 @@ public class KeyboardFactory {
 
     public InlineKeyboardMarkup publishPreviewInline(long postId) {
         return inlineRows(List.of(
-                row(button("✅ Опубликовать…", CallbackData.PREFIX_PUBLISH + "when:" + postId)),
-                row(button("✏️ Редактировать", CallbackData.PREFIX_PUBLISH + "edit:" + postId)),
+                row(button("🚀 Сейчас", CallbackData.PREFIX_PUBLISH + "confirm:" + postId)),
+                row(button("📅 По расписанию", CallbackData.PREFIX_SCHEDULE + "open:" + postId)),
                 row(
-                        button("🖼 С фото", CallbackData.PREFIX_PUBLISH + "photo:" + postId),
-                        button("◀️ Назад", CallbackData.PREFIX_PUBLISH + "cancel:" + postId)
-                )
+                        button("✏️ Править", CallbackData.PREFIX_PUBLISH + "edit:" + postId),
+                        button("🖼 Фото", CallbackData.PREFIX_PUBLISH + "photomenu:" + postId)
+                ),
+                row(button("◀️ К черновику", CallbackData.PREFIX_PUBLISH + "cancel:" + postId))
         ));
+    }
+
+    /** Выбор источника фото: сток и/или своё. */
+    public InlineKeyboardMarkup photoMenuInline(long postId, boolean stockAvailable) {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        if (stockAvailable) {
+            rows.add(row(button("🔎 Подобрать фото", CallbackData.PREFIX_PUBLISH + "photo:" + postId)));
+        }
+        rows.add(row(button("📎 Своё фото", CallbackData.PREFIX_PUBLISH + "ownphoto:" + postId)));
+        rows.add(row(button("◀️ К черновику", CallbackData.PREFIX_PUBLISH + "cancel:" + postId)));
+        return inlineRows(rows);
     }
 
     /** После выбора фото / перед отправкой: сейчас или по времени. */
@@ -367,19 +406,31 @@ public class KeyboardFactory {
         return inlineRows(List.of(
                 row(button("🚀 Опубликовать сейчас", CallbackData.PREFIX_PUBLISH + "confirm:" + postId)),
                 row(button("📅 По расписанию", CallbackData.PREFIX_SCHEDULE + "open:" + postId)),
-                row(button("◀️ Назад", CallbackData.PREFIX_PUBLISH + "preview:" + postId))
+                row(button("◀️ К черновику", CallbackData.PREFIX_PUBLISH + "cancel:" + postId))
         ));
     }
 
+    public InlineKeyboardMarkup photoPreviewInline(long postId, boolean stockAvailable) {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(row(button("🚀 В эфир", CallbackData.PREFIX_PUBLISH + "when:" + postId)));
+        List<InlineKeyboardButton> swap = new ArrayList<>();
+        if (stockAvailable) {
+            swap.add(button("🔄 Другое фото", CallbackData.PREFIX_PUBLISH + "rephoto:" + postId));
+        }
+        swap.add(button("📎 Своё", CallbackData.PREFIX_PUBLISH + "ownphoto:" + postId));
+        rows.add(swap);
+        rows.add(row(button("❌ Без фото", CallbackData.PREFIX_PUBLISH + "nophoto:" + postId)));
+        rows.add(row(button("◀️ К черновику", CallbackData.PREFIX_PUBLISH + "cancel:" + postId)));
+        return inlineRows(rows);
+    }
+
     public InlineKeyboardMarkup photoPreviewInline(long postId) {
+        return photoPreviewInline(postId, imageProperties.isConfigured());
+    }
+
+    public InlineKeyboardMarkup photoWaitInline(long postId) {
         return inlineRows(List.of(
-                row(button("✅ Дальше — когда публиковать?", CallbackData.PREFIX_PUBLISH + "when:" + postId)),
-                row(button("✏️ Редактировать текст", CallbackData.PREFIX_PUBLISH + "edit:" + postId)),
-                row(
-                        button("🔄 Другое фото", CallbackData.PREFIX_PUBLISH + "rephoto:" + postId),
-                        button("❌ Без фото", CallbackData.PREFIX_PUBLISH + "nophoto:" + postId)
-                ),
-                row(button("◀️ К посту", CallbackData.PREFIX_PUBLISH + "preview:" + postId))
+                row(button("◀️ Отмена", CallbackData.PREFIX_PUBLISH + "photomenu:" + postId))
         ));
     }
 
@@ -396,6 +447,12 @@ public class KeyboardFactory {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(row(button("🔥 Лиды и продажи" + (leadCount > 0 ? " (" + leadCount + ")" : ""),
                 CallbackData.AGENT_SALES)));
+        if (subscribed) {
+            rows.add(row(
+                    button("📨 Рассылка", CallbackData.AGENT_OUTREACH),
+                    button("🔍 Парсинг ЦА", CallbackData.AGENT_PARSE)
+            ));
+        }
         rows.add(row(button("⚙️ Настройка", CallbackData.AGENT_SETTINGS)));
         rows.add(row(button("◀️ В меню", CallbackData.MENU_MAIN)));
         return inlineRows(rows);
@@ -404,9 +461,9 @@ public class KeyboardFactory {
     public InlineKeyboardMarkup contentHubInline(Long requestId) {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         if (requestId != null) {
-            rows.add(row(button("💡 Идеи и посты", CallbackData.PREFIX_RESULT + "ideas:" + requestId)));
+            rows.add(row(button("💡 Что публиковать", CallbackData.PREFIX_RESULT + "ideas:" + requestId)));
         } else {
-            rows.add(row(button("🔍 Запустить анализ", CallbackData.REQ_FREE)));
+            rows.add(row(button("🔍 Новый анализ", CallbackData.REQ_FREE)));
         }
         rows.add(row(
                 button("📊 Аналитика", CallbackData.MENU_ANALYTICS),
@@ -462,8 +519,6 @@ public class KeyboardFactory {
     public InlineKeyboardMarkup agentSalesInline(long leadCount) {
         return inlineRows(List.of(
                 row(button("🔥 Лиды" + (leadCount > 0 ? " (" + leadCount + ")" : ""), CallbackData.AGENT_LEADS)),
-                row(button("📨 Рассылка", CallbackData.AGENT_OUTREACH)),
-                row(button("🔍 Парсинг ЦА", CallbackData.AGENT_PARSE)),
                 row(button("🧠 Профиль компании", CallbackData.AGENT_FAQ)),
                 row(button("📘 Книга возражений", CallbackData.AGENT_OBJECTIONS)),
                 row(button("📌 Выводы", CallbackData.AGENT_LEARNINGS)),
@@ -507,6 +562,18 @@ public class KeyboardFactory {
                 row(button("📋 Мои сделки", CallbackData.AGENT_DEAL_LIST)),
                 row(button("◀️ В меню", CallbackData.MENU_MAIN))
         ));
+    }
+
+    public InlineKeyboardMarkup parseSuggestInline(List<AdPlacementEntity> places) {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        for (AdPlacementEntity p : places.stream().limit(8).toList()) {
+            rows.add(row(button("@" + p.getTargetUsername(),
+                    CallbackData.AGENT_PARSE_SRC + p.getId())));
+        }
+        rows.add(row(button("🔍 Искать ещё", CallbackData.AGENT_PARSE)));
+        rows.add(row(button("📎 Своя ссылка", CallbackData.AGENT_PARSE_LINK)));
+        rows.add(row(button("◀️ К ассистенту", CallbackData.AGENT_OPEN)));
+        return inlineRows(rows);
     }
 
     public InlineKeyboardMarkup adRadarMatchInline(List<AdPlacementEntity> places) {
@@ -595,13 +662,14 @@ public class KeyboardFactory {
 
     public InlineKeyboardMarkup outreachMenuInline(List<OutreachCampaignEntity> campaigns) {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(row(button("🔍 Парсинг → рассылка", CallbackData.AGENT_PARSE)));
         rows.add(row(button("➕ Новая кампания", CallbackData.AGENT_OUTREACH_NEW)));
-        for (OutreachCampaignEntity c : campaigns.stream().limit(3).toList()) {
-            rows.add(row(button("#" + c.getId() + " · " + c.getName(),
+        for (OutreachCampaignEntity c : campaigns.stream().limit(5).toList()) {
+            String st = OutreachCampaignService.statusLabel(c.getStatus());
+            rows.add(row(button(st + " · #" + c.getId() + " " + c.getName(),
                     CallbackData.AGENT_OUTREACH_VIEW + c.getId())));
         }
-        rows.add(row(button("◀️ К росту", CallbackData.AGENT_GROWTH)));
-        rows.add(row(button("🏠 В меню", CallbackData.MENU_MAIN)));
+        rows.add(row(button("◀️ К ассистенту", CallbackData.AGENT_OPEN)));
         return inlineRows(rows);
     }
 
@@ -616,21 +684,49 @@ public class KeyboardFactory {
         ));
     }
 
-    public InlineKeyboardMarkup outreachCampaignInline(OutreachCampaignEntity campaign) {
+    public InlineKeyboardMarkup outreachCampaignInline(
+            OutreachCampaignEntity campaign, long pending, long replied, int dmRemaining
+    ) {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         String st = campaign.getStatus();
-        if ("DRAFT".equals(st) || "PAUSED".equals(st)) {
-            rows.add(row(button("▶️ Запустить", CallbackData.AGENT_OUTREACH_START + campaign.getId())));
+        boolean hasSource = campaign.getSourceRef() != null && !campaign.getSourceRef().isBlank();
+        if (hasSource && pending == 0 && !"RUNNING".equals(st)) {
+            rows.add(row(button("🔍 Парсить группу", CallbackData.AGENT_OUTREACH_PARSE + campaign.getId())));
+        }
+        if (("DRAFT".equals(st) || "PAUSED".equals(st) || "COMPLETED".equals(st)) && pending > 0) {
+            if (dmRemaining > 0) {
+                rows.add(row(button("▶️ Запустить", CallbackData.AGENT_OUTREACH_START + campaign.getId())));
+            } else {
+                rows.add(row(button("💳 Докупить ЛС", CallbackData.PAY_SELECT)));
+            }
         }
         if ("RUNNING".equals(st)) {
             rows.add(row(button("⏸ Пауза", CallbackData.AGENT_OUTREACH_PAUSE + campaign.getId())));
         }
+        if (replied > 0) {
+            rows.add(row(button("💬 Ответы (" + replied + ")",
+                    CallbackData.AGENT_OUTREACH_REPLIES + campaign.getId())));
+        }
         rows.add(row(button("➕ Добавить @username", CallbackData.AGENT_OUTREACH_IMPORT + campaign.getId())));
-        if (campaign.getSourceRef() != null && !campaign.getSourceRef().isBlank()) {
-            rows.add(row(button("🔍 Парсить группу", CallbackData.AGENT_OUTREACH_PARSE + campaign.getId())));
+        if (hasSource && pending > 0) {
+            rows.add(row(button("🔍 Допарсить группу", CallbackData.AGENT_OUTREACH_PARSE + campaign.getId())));
         }
         rows.add(row(button("◀️ К рассылкам", CallbackData.AGENT_OUTREACH)));
         return inlineRows(rows);
+    }
+
+    public InlineKeyboardMarkup outreachParseDoneInline(long campaignId) {
+        return inlineRows(List.of(
+                row(button("▶️ К кампании", CallbackData.AGENT_OUTREACH_VIEW + campaignId)),
+                row(button("◀️ К рассылкам", CallbackData.AGENT_OUTREACH))
+        ));
+    }
+
+    public InlineKeyboardMarkup outreachReplyPingInline(long campaignId) {
+        return inlineRows(List.of(
+                row(button("💬 Ответы кампании", CallbackData.AGENT_OUTREACH_REPLIES + campaignId)),
+                row(button("🔥 Лиды", CallbackData.AGENT_LEADS))
+        ));
     }
 
     public InlineKeyboardMarkup scoutAdminInline(List<ScoutAccountEntity> accounts) {
@@ -721,6 +817,7 @@ public class KeyboardFactory {
 
     public InlineKeyboardMarkup publishEditInline(long postId) {
         return inlineRows(List.of(
+                row(button("✂️ Короче", CallbackData.PREFIX_PUBLISH + "tighter:" + postId)),
                 row(button("◀️ Отмена", CallbackData.PREFIX_PUBLISH + "cancel:" + postId))
         ));
     }
@@ -820,7 +917,11 @@ public class KeyboardFactory {
     }
 
     public InlineKeyboardMarkup analysisSectionsInline(long requestId, int current, int total, boolean teaserMode) {
-        return inlineRows(buildSectionRows(requestId, current, total, teaserMode));
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>(buildSectionRows(requestId, current, total, teaserMode));
+        if (teaserMode && billingProperties.isEnabled()) {
+            rows.add(row(button("🚀 Полный разбор + посты", CallbackData.PAY_SELECT)));
+        }
+        return inlineRows(rows);
     }
 
     private List<List<InlineKeyboardButton>> buildSectionRows(
@@ -828,7 +929,11 @@ public class KeyboardFactory {
     ) {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         List<InlineKeyboardButton> row = new ArrayList<>();
+        int ideasIdx = DeepAnalysisSections.ideasFunnelIndex(total);
         for (int i = 0; i < total; i++) {
+            if (DeepAnalysisSections.isIdeasFunnelIndex(i, total)) {
+                continue; // вниз отдельной широкой кнопкой
+            }
             String label = DeepAnalysisSections.shortLabel(i);
             if (current >= 0 && i == current) {
                 label = "• " + label;
@@ -842,6 +947,13 @@ public class KeyboardFactory {
         }
         if (!row.isEmpty()) {
             rows.add(row);
+        }
+        if (total > 0) {
+            String ideasLabel = "💡 Что публиковать";
+            if (current == ideasIdx) {
+                ideasLabel = "• " + ideasLabel;
+            }
+            rows.add(row(button(ideasLabel, CallbackData.PREFIX_RESULT + "ideas:" + requestId)));
         }
         return rows;
     }

@@ -39,6 +39,7 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMa
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Component
@@ -257,6 +258,8 @@ public class ResultCallbackHandler {
         int end = Math.min(start + IDEAS_PER_PAGE, ideas.size());
         List<ContentIdeaEntity> pageIdeas = ideas.subList(start, end);
 
+        Map<Long, String> ideaStatuses = contentPlanService.statusesForIdeas(ctx.channel().getId(), ideas);
+
         UserSession session = sessionService.getOrCreate(chatId);
         int draftLimit = billingProperties.draftLimitFor(ctx.request().getType());
         int draftsLeft = billingProperties.isEnabled()
@@ -267,11 +270,12 @@ public class ResultCallbackHandler {
         int regensLeft = session.ideasRegensRemaining(ctx.request().getId(), regenLimit);
 
         String text = buildIdeasMessage(
-                ctx.channel().getTitle(), pageIdeas, start, p, totalPages, ctx.freeTier(), draftsLeft, regensLeft);
+                ctx.channel().getTitle(), pageIdeas, start, p, totalPages,
+                ctx.freeTier(), draftsLeft, regensLeft, ideaStatuses);
         List<Long> pageIds = pageIdeas.stream().map(ContentIdeaEntity::getId).toList();
         boolean showBatchPosts = billingProperties.isEnabled() && !ctx.freeTier();
         InlineKeyboardMarkup keyboard = keyboards.ideasPageInline(
-                requestId, pageIds, start, p, totalPages, locked, showBatchPosts, true, regensLeft);
+                requestId, pageIds, start, p, totalPages, locked, showBatchPosts, true, regensLeft, ideaStatuses);
 
         if (messageId > 0) {
             messageSender.editText(chatId, messageId, text, keyboard);
@@ -440,7 +444,7 @@ public class ResultCallbackHandler {
         String text = ConversionCopy.draftHeader(idea.getTitle())
                 + "\n\n"
                 + TgHtml.fromMarkdown(draft)
-                + ConversionCopy.draftPhotoHint(org.example.pulse_ai.telegram.TelegramLimits.fitsPhotoCaption(draft))
+                + ConversionCopy.draftNextStepHint()
                 + footerBlock(ctx.freeTier(), draftsLeft);
         InlineKeyboardMarkup keyboard = keyboards.draftResultInline(
                 requestId, ideaId, savedPost.getId(), sectionTotal, teaser, ctx.freeTier(), draftsLeft);
@@ -598,7 +602,8 @@ public class ResultCallbackHandler {
             int totalPages,
             boolean freeTier,
             int draftsLeft,
-            int ideasRegensLeft
+            int ideasRegensLeft,
+            Map<Long, String> ideaStatuses
     ) {
         StringBuilder sb = new StringBuilder(ConversionCopy.ideasIntro(channelTitle, freeTier, draftsLeft));
         if (ideasRegensLeft > 0) {
@@ -608,6 +613,7 @@ public class ResultCallbackHandler {
         sb.append("\n\n");
         int n = globalStart + 1;
         for (ContentIdeaEntity idea : pageIdeas) {
+            String used = ideaStatuses != null ? ideaStatuses.get(idea.getId()) : null;
             sb.append(ConversionCopy.ideaBlock(
                     n++,
                     idea.getTitle(),
@@ -615,15 +621,16 @@ public class ResultCallbackHandler {
                     idea.getFormat(),
                     idea.getSuggestedDay(),
                     idea.getClosesGap(),
-                    idea.getCta()
+                    idea.getCta(),
+                    used
             ));
             sb.append('\n');
         }
         if (totalPages > 1) {
             sb.append("<i>Стр. ").append(page + 1).append('/').append(totalPages)
-                    .append(" · листайте стрелками ниже, жмите «Пост N» — напишу текст.</i>");
+                    .append(" · «Пост N» → текст → «В эфир»</i>");
         } else {
-            sb.append("<i>↓ Выберите идею и нажмите «Пост» — напишу текст</i>");
+            sb.append("<i>↓ «Пост N» → текст → «🚀 В эфир»</i>");
         }
         return sb.toString().trim();
     }
@@ -667,6 +674,7 @@ public class ResultCallbackHandler {
         sb.append("🧠 <b>Разбор канала</b>");
         sb.append(" <i>(").append(index + 1).append('/').append(total).append(")</i>\n\n");
         sb.append(TgHtml.fromMarkdown(section.body()));
+        sb.append("\n\n<i>Готовы постить? → «💡 Что публиковать»</i>");
         return sb.toString().trim();
     }
 

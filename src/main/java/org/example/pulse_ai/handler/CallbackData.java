@@ -64,9 +64,11 @@ public final class CallbackData {
     public static final String AGENT_OUTREACH_PAUSE = PREFIX_AGENT + "outreach:pause:";
     public static final String AGENT_OUTREACH_IMPORT = PREFIX_AGENT + "outreach:import:";
     public static final String AGENT_OUTREACH_PARSE = PREFIX_AGENT + "outreach:parse:";
+    public static final String AGENT_OUTREACH_REPLIES = PREFIX_AGENT + "outreach:replies:";
 
-    /** Парсинг ЦА по ссылке (отдельно от кампании). */
     public static final String AGENT_PARSE = PREFIX_AGENT + "parse";
+    public static final String AGENT_PARSE_SRC = PREFIX_AGENT + "parse:src:";
+    public static final String AGENT_PARSE_LINK = PREFIX_AGENT + "parse:link";
 
     public static final String AGENT_SCOUT_STATUS = PREFIX_AGENT + "scout:status";
     public static final String AGENT_SCOUT_ADMIN = PREFIX_AGENT + "scout:admin";

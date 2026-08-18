@@ -2,6 +2,10 @@ package org.example.pulse_ai.domain.radar;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.pulse_ai.domain.audience.AudienceBrief;
+import org.example.pulse_ai.domain.audience.AudienceBriefGrounding;
+import org.example.pulse_ai.domain.audience.AudienceIntelService;
+import org.example.pulse_ai.domain.audience.AudienceLexicon;
 import org.example.pulse_ai.persistence.entity.AdPlacementEntity;
 import org.example.pulse_ai.persistence.entity.ChannelEntity;
 import org.example.pulse_ai.persistence.entity.ChannelProfileSnapshotEntity;
@@ -14,16 +18,15 @@ import org.example.pulse_ai.stats.external.TgstatApiClient;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 /**
- * Подбор площадок под канал пользователя.
- * Не требует полного скрейпа каждого кандидата — сначала быстрые карточки из TGStat/базы Pulse.
+ * Подбор площадок: несколько запросов из профиля ЦА, потом отсев по токенам и размеру.
  */
 @Slf4j
 @Service
@@ -31,37 +34,39 @@ import java.util.regex.Pattern;
 public class AdPlacementMatchService {
 
     private static final int MAX_RESULTS = 6;
-    private static final Pattern NOISE = Pattern.compile("[^\\p{L}\\p{N}\\s]+");
 
     private final ChannelProfileSnapshotRepository profileRepository;
     private final TgstatApiClient tgstatApiClient;
     private final TgstatAccessService tgstatAccessService;
     private final AdRadarService adRadarService;
+    private final AudienceIntelService audienceIntelService;
 
     public MatchResult matchForChannel(UserEntity user, ChannelEntity owner) {
-        String niche = resolveNicheLabel(owner);
-        String searchQuery = resolveSearchQuery(owner, niche);
+        AudienceBrief brief = audienceIntelService.resolve(owner);
         String me = owner.getUsername() != null ? owner.getUsername().toLowerCase(Locale.ROOT) : "";
-        int mySubs = owner.getSubscriberCount() != null ? owner.getSubscriberCount() : 0;
-
-        Map<String, PeerHint> peers = new LinkedHashMap<>();
         boolean useTgstat = tgstatAccessService.forPlacementSearch(user.getId());
 
-        // 1) TGStat по строке поиска (название / ниша) — CONTENT+
-        if (useTgstat) {
-            for (NicheComparison.Peer p : tgstatApiClient.searchPeers(searchQuery, me, 20)) {
-                addPeer(peers, p, "TGStat · «" + searchQuery + "»");
-            }
+        if (!brief.usable()) {
+            return MatchResult.empty("""
+                    ЦА ещё не собрана: мало своих постов или только общее имя канала.
+                    Разберите канал (ссылка → анализ) — бот вытащит темы из текстов, не из ярлыка каталога.
+                    Пока можно проверить конкретный @канал в «⋯ Ещё».""");
+        }
 
-            // 2) TGStat по категории, если есть
-            if (niche != null && !niche.equalsIgnoreCase(searchQuery)) {
-                for (NicheComparison.Peer p : tgstatApiClient.searchPeers(niche, me, 15)) {
-                    addPeer(peers, p, "ниша «" + niche + "»");
+        Map<String, PeerHint> peers = new LinkedHashMap<>();
+        if (useTgstat) {
+            for (String q : brief.searchQueries()) {
+                for (NicheComparison.Peer p : tgstatApiClient.searchPeers(q, me, 12)) {
+                    addPeer(peers, p.title(), p.username(), p.subscribers(), "TGStat · «" + q + "»", brief);
                 }
+            }
+            String niche = owner.getCategory();
+            if (niche != null && !AudienceLexicon.tooBroadLabel(niche) && !AudienceLexicon.tooBroadAloneQuery(niche)) {
                 try {
+                    int mySubs = owner.getSubscriberCount() != null ? owner.getSubscriberCount() : 0;
                     tgstatApiClient.compareNiche(niche, mySubs, me).ifPresent(n -> {
                         for (NicheComparison.Peer p : n.similar()) {
-                            addPeer(peers, p, "похожий размер в нише");
+                            addPeer(peers, p.title(), p.username(), p.subscribers(), "похожий размер в нише", brief);
                         }
                     });
                 } catch (Exception ex) {
@@ -70,8 +75,8 @@ public class AdPlacementMatchService {
             }
         }
 
-        // 3) Локальная база разборов Pulse
-        if (niche != null) {
+        String niche = owner.getCategory();
+        if (niche != null && !AudienceLexicon.tooBroadLabel(niche) && !AudienceLexicon.tooBroadAloneQuery(niche)) {
             for (ChannelProfileSnapshotEntity snap : profileRepository.findByCategoryOrderByAnalyzedAtDesc(niche)) {
                 if (snap.getUsername() == null || snap.getUsername().isBlank()) {
                     continue;
@@ -80,13 +85,9 @@ public class AdPlacementMatchService {
                 if (u.equals(me) || owner.getId().equals(snap.getChannelId())) {
                     continue;
                 }
-                peers.putIfAbsent(u, new PeerHint(
-                        snap.getTitle() != null ? snap.getTitle() : u,
-                        u,
-                        snap.getSubscriberCount() != null ? snap.getSubscriberCount() : 0,
-                        snap.getAvgViews(),
-                        "из базы Pulse · «" + niche + "»"));
-                if (peers.size() >= 20) {
+                int subs = snap.getSubscriberCount() != null ? snap.getSubscriberCount() : 0;
+                addPeer(peers, snap.getTitle(), u, subs, "из базы Pulse", brief);
+                if (peers.size() >= 24) {
                     break;
                 }
             }
@@ -96,33 +97,24 @@ public class AdPlacementMatchService {
             boolean apiOn = tgstatApiClient.isEnabled();
             StringBuilder why = new StringBuilder();
             if (!apiOn) {
-                why.append("TGStat API не подключён (нет token в pulse.external.tgstat-token).\n");
+                why.append("TGStat API не подключён.\n");
             } else if (!useTgstat) {
-                why.append("Глубокий поиск площадок через TGStat — в тарифах CONTENT и PRO.\n");
-                why.append("Сейчас доступен только поиск по уже разобранным каналам в базе Pulse.\n");
+                why.append("Поиск площадок через TGStat — в тарифах CONTENT и PRO.\n");
             } else {
-                why.append("По запросу «").append(searchQuery).append("» кандидатов нет.\n");
-                why.append("Частые причины: на токене нет доступа к /channels/search (нужен платный Stat), ")
-                        .append("квота, или ищем по названию канала вместо ниши.\n");
+                why.append("По запросам «").append(brief.queryLabel()).append("» TGStat ничего не вернул.\n");
             }
-            if (niche == null || niche.isBlank()) {
-                why.append("\nУ канала не сохранена категория после разбора — ")
-                        .append("подбор ищет по названию («").append(searchQuery).append("»), это почти всегда пусто.\n");
-            }
-            why.append("\nЧто сделать:\n");
-            if (!useTgstat) {
-                why.append("• возьми пакет CONTENT/PRO — откроется поиск TGStat по нише\n");
-            } else {
-                why.append("• возьми тариф TGStat API Stat и проверь, что token от Stat (не только веб)\n");
-            }
-            why.append("• разбери 1–2 канала своей тематики — появится category в базе\n");
-            why.append("• или «⋯ Ещё» → проверка @площадки вручную");
+            why.append("ЦА: ").append(brief.summaryLine()).append("\n");
+            why.append("• разберите канал ещё раз, если постов стало больше\n");
+            why.append("• или проверьте @площадку вручную");
             return MatchResult.empty(why.toString());
         }
 
+        List<PeerHint> ranked = new ArrayList<>(peers.values());
+        ranked.sort(Comparator.comparingInt(PeerHint::overlap).reversed());
+
         List<ScoredPlacement> scored = new ArrayList<>();
         int n = 0;
-        for (PeerHint hint : peers.values()) {
+        for (PeerHint hint : ranked) {
             if (n >= MAX_RESULTS) {
                 break;
             }
@@ -152,66 +144,53 @@ public class AdPlacementMatchService {
             scored.add(new ScoredPlacement(saved, hint.reason(), hint.subscribers(), price));
         }
 
-        String label = niche != null ? niche : searchQuery;
-        return new MatchResult(label, scored, null);
+        return new MatchResult(brief.queryLabel(), scored, null, brief.summaryLine());
     }
 
-    private static void addPeer(Map<String, PeerHint> peers, NicheComparison.Peer p, String reason) {
-        if (p.username() == null || p.username().isBlank()) {
+    private static void addPeer(
+            Map<String, PeerHint> peers,
+            String title,
+            String username,
+            int subscribers,
+            String reason,
+            AudienceBrief brief
+    ) {
+        if (username == null || username.isBlank()) {
             return;
         }
-        String u = p.username().toLowerCase(Locale.ROOT);
-        peers.putIfAbsent(u, new PeerHint(p.title(), u, p.subscribers(), null, reason));
+        if (!AudienceBriefGrounding.sizeOk(subscribers, brief.minSubs(), brief.maxSubs())) {
+            return;
+        }
+        String u = username.toLowerCase(Locale.ROOT);
+        int overlap = overlapScore(title, username, brief);
+        peers.putIfAbsent(u, new PeerHint(title, u, subscribers, null, reason, overlap));
     }
 
-    private String resolveNicheLabel(ChannelEntity owner) {
-        if (owner.getCategory() != null && !owner.getCategory().isBlank()) {
-            return owner.getCategory().trim();
+    private static int overlapScore(String title, String username, AudienceBrief brief) {
+        String blob = AudienceLexicon.norm((title == null ? "" : title) + " " + (username == null ? "" : username));
+        int score = 0;
+        List<String> needles = new ArrayList<>();
+        if (brief.searchQueries() != null) {
+            needles.addAll(brief.searchQueries());
         }
-        return profileRepository.findByChannelIdOrderByAnalyzedAtDesc(owner.getId()).stream()
-                .map(ChannelProfileSnapshotEntity::getCategory)
-                .filter(c -> c != null && !c.isBlank())
-                .findFirst()
-                .orElse(null);
+        for (String q : needles) {
+            for (String part : AudienceLexicon.norm(q).split("\\s+")) {
+                if (part.length() >= 4 && blob.contains(part)) {
+                    score++;
+                }
+            }
+        }
+        return score;
     }
 
-    /** Строка для поиска: ниша; название канала — только если похоже на тему, не бренд. */
-    private String resolveSearchQuery(ChannelEntity owner, String niche) {
-        if (niche != null && !niche.isBlank()) {
-            return niche;
-        }
-        String title = owner.getTitle() != null ? owner.getTitle() : "";
-        String cleaned = NOISE.matcher(title).replaceAll(" ").replaceAll("\\s+", " ").trim();
-        String lower = cleaned.toLowerCase(Locale.ROOT);
-        // Бренд продукта / слишком общее имя — не годится как ниша для TGStat search
-        if (lower.contains("pulse") || lower.equals("ai") || cleaned.length() < 4) {
-            return "бизнес";
-        }
-        String[] parts = cleaned.split(" ");
-        StringBuilder q = new StringBuilder();
-        for (String p : parts) {
-            if (p.length() < 3) {
-                continue;
-            }
-            String pl = p.toLowerCase(Locale.ROOT);
-            if (pl.equals("pulse") || pl.equals("channel") || pl.equals("канал")) {
-                continue;
-            }
-            if (q.length() > 0) {
-                q.append(' ');
-            }
-            q.append(p);
-            if (q.length() > 40) {
-                break;
-            }
-        }
-        if (q.length() >= 3) {
-            return q.toString();
-        }
-        return owner.getUsername() != null ? owner.getUsername() : "telegram";
-    }
-
-    private record PeerHint(String title, String username, int subscribers, Integer avgViews, String reason) {
+    private record PeerHint(
+            String title,
+            String username,
+            int subscribers,
+            Integer avgViews,
+            String reason,
+            int overlap
+    ) {
     }
 
     public record ScoredPlacement(
@@ -222,9 +201,9 @@ public class AdPlacementMatchService {
     ) {
     }
 
-    public record MatchResult(String category, List<ScoredPlacement> placements, String emptyMessage) {
+    public record MatchResult(String category, List<ScoredPlacement> placements, String emptyMessage, String audienceLine) {
         static MatchResult empty(String msg) {
-            return new MatchResult(null, List.of(), msg);
+            return new MatchResult(null, List.of(), msg, null);
         }
 
         public boolean isEmpty() {

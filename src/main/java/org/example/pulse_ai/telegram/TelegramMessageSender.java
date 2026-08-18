@@ -365,7 +365,7 @@ public class TelegramMessageSender {
         }
         try {
             InputMediaPhoto media = InputMediaPhoto.builder()
-                    .media(imageUrl)
+                    .media(telegramPhotoMedia(imageUrl))
                     .parseMode("HTML")
                     .build();
             if (caption != null && !caption.isBlank()) {
@@ -394,7 +394,7 @@ public class TelegramMessageSender {
         try {
             SendPhoto.SendPhotoBuilder builder = SendPhoto.builder()
                     .chatId(chatId)
-                    .photo(new InputFile(imageUrl))
+                    .photo(photoInput(imageUrl))
                     .parseMode("HTML");
             if (caption != null && !caption.isBlank()) {
                 builder.caption(caption);
@@ -411,7 +411,7 @@ public class TelegramMessageSender {
     }
 
     /**
-     * Publishes a photo by URL to a channel with an optional HTML caption.
+     * Publishes a photo by URL / tgfile:id to a channel with an optional HTML caption.
      * Returns message id or null on failure. Caption must be ≤ 1024 chars (Telegram limit).
      */
     public Integer sendPhotoUrlToChannel(long channelChatId, String imageUrl, String caption) {
@@ -422,7 +422,7 @@ public class TelegramMessageSender {
         try {
             SendPhoto.SendPhotoBuilder builder = SendPhoto.builder()
                     .chatId(channelChatId)
-                    .photo(new InputFile(imageUrl))
+                    .photo(photoInput(imageUrl))
                     .parseMode("HTML");
             if (caption != null && !caption.isBlank()) {
                 builder.caption(caption);
@@ -432,6 +432,29 @@ public class TelegramMessageSender {
             log.warn("Не удалось опубликовать фото в канал {}: {}", channelChatId, e.getMessage());
             return null;
         }
+    }
+
+    /** Своё фото юзера храним как {@code tgfile:<file_id>}. */
+    public static String tgFileRef(String fileId) {
+        return fileId == null || fileId.isBlank() ? null : "tgfile:" + fileId.trim();
+    }
+
+    public static boolean isTgFileRef(String imageUrl) {
+        return imageUrl != null && imageUrl.startsWith("tgfile:");
+    }
+
+    private static InputFile photoInput(String imageUrl) {
+        if (isTgFileRef(imageUrl)) {
+            return new InputFile(imageUrl.substring("tgfile:".length()));
+        }
+        return new InputFile(imageUrl);
+    }
+
+    private static String telegramPhotoMedia(String imageUrl) {
+        if (isTgFileRef(imageUrl)) {
+            return imageUrl.substring("tgfile:".length());
+        }
+        return imageUrl;
     }
 
     /**

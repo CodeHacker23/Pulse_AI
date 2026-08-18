@@ -9,8 +9,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 @Service
@@ -46,6 +49,47 @@ public class ContentPlanService {
     public List<ContentPlanItemEntity> recentPlan(Long channelId) {
         return repository.findTop15ByChannelIdAndStatusInOrderByUpdatedAtDesc(
                 channelId, EXCLUDE_STATUSES);
+    }
+
+    /**
+     * Статусы идей канала (CHOSEN / DRAFTED / PUBLISHED) за окно exclude —
+     * по ideaId и, если нет совпадения, по нормализованному title.
+     */
+    public Map<Long, String> statusesForIdeas(Long channelId, Collection<ContentIdeaEntity> ideas) {
+        Map<Long, String> out = new HashMap<>();
+        if (channelId == null || ideas == null || ideas.isEmpty()) {
+            return out;
+        }
+        Instant after = Instant.now().minus(EXCLUDE_DAYS, ChronoUnit.DAYS);
+        List<ContentPlanItemEntity> recent = repository.findByChannelIdAndStatusInAndUpdatedAtAfter(
+                channelId, EXCLUDE_STATUSES, after);
+        Map<Long, String> byIdeaId = new HashMap<>();
+        Map<String, String> byTopic = new HashMap<>();
+        for (ContentPlanItemEntity item : recent) {
+            if (item.getIdeaId() != null) {
+                byIdeaId.merge(item.getIdeaId(), item.getStatus(), ContentPlanService::preferStatus);
+            }
+            if (item.getTopicKey() != null && !item.getTopicKey().isBlank()) {
+                byTopic.merge(item.getTopicKey(), item.getStatus(), ContentPlanService::preferStatus);
+            }
+        }
+        for (ContentIdeaEntity idea : ideas) {
+            if (idea == null || idea.getId() == null) {
+                continue;
+            }
+            String status = byIdeaId.get(idea.getId());
+            if (status == null) {
+                status = byTopic.get(topicKey(idea.getTitle()));
+            }
+            if (status != null) {
+                out.put(idea.getId(), status);
+            }
+        }
+        return out;
+    }
+
+    private static String preferStatus(String a, String b) {
+        return rank(b) >= rank(a) ? b : a;
     }
 
     @Transactional

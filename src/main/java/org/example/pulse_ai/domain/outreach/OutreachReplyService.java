@@ -2,6 +2,7 @@ package org.example.pulse_ai.domain.outreach;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.pulse_ai.keyboard.KeyboardFactory;
 import org.example.pulse_ai.persistence.entity.HotLeadEntity;
 import org.example.pulse_ai.persistence.entity.OutreachCampaignEntity;
 import org.example.pulse_ai.persistence.entity.OutreachProspectEntity;
@@ -30,6 +31,7 @@ public class OutreachReplyService {
     private final HotLeadRepository hotLeadRepository;
     private final UserRepository userRepository;
     private final TelegramMessageSender messageSender;
+    private final KeyboardFactory keyboards;
 
     @Transactional
     public boolean markReplied(long prospectId, String replySnippet) {
@@ -69,11 +71,12 @@ public class OutreachReplyService {
 
             userRepository.findById(campaign.getUserId()).ifPresent(user -> {
                 if (user.getTelegramId() != null) {
-                    messageSender.sendTextSafe(user.getTelegramId(),
+                    messageSender.sendTextWithInlineSafe(user.getTelegramId(),
                             "💬 <b>Ответ на рассылку</b>\n"
                                     + "@" + (prospect.getUsername() != null ? prospect.getUsername() : "?")
                                     + " ответил на кампанию #" + campaign.getId() + ".\n"
-                                    + "Pulse Ассистент → Лиды и продажи.");
+                                    + "Дальше — дожим в лидах.",
+                            keyboards.outreachReplyPingInline(campaign.getId()));
                 }
             });
         }

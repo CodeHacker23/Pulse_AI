@@ -10,22 +10,52 @@ import org.example.pulse_ai.telegram.TelegramLimits;
 import org.example.pulse_ai.text.TextHumanizer;
 import org.springframework.stereotype.Service;
 
+import java.util.concurrent.ThreadLocalRandom;
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class PostDraftService {
 
-    private static final String SYSTEM = """
-            Ты — копирайтер Telegram-каналов. Пишешь посты, которые хочется дочитать.
-            Стиль: как у автора канала (смотри примеры топ-постов), без коуч-штампов и «5 советов».
+    /** Примерно каждый второй пост — с вопросом к аудитории, остальные без. */
+    static final int AUDIENCE_QUESTION_CHANCE_PERCENT = 45;
 
-            СТРУКТУРА (обязательно, это Telegram — читают с телефона):
-            - Первая строка — цепляющий заголовок, обёрнутый в **звёздочки** (будет жирным), с 1 эмодзи. Отдельной строкой.
+    /**
+     * Общие правила голоса: стиль автора, интерес без «ИИ-тона».
+     * Тип финала (с вопросом / без) задаётся отдельно на каждый пост — не угадывай сам.
+     */
+    static final String VOICE_AND_ENGAGE = """
+            ГОЛОС:
+            - Пиши так, будто это сам автор канала после удачных постов — не «помощник», не коуч, не маркетолог.
+            - Копируй ритм и лексику примеров/стиля автора. Если стиль дан явно — он важнее всего.
+            - Без канцелярита и ИИ-штампов: «в современном мире», «важно отметить», «давайте разберёмся»,
+              «не секрет», «в заключение», «стоит отметить», «каждый из нас».
+            - Не выдумывай факты, цифры, цитаты, кейсы. Нет данных — пиши общо или опусти деталь.
+            - Опирайся только на идею, бриф и примеры. Не добавляй «из головы» то, чего нет во входе.
+
+            ВОВЛЕЧЕНИЕ (под капотом, не объясняй читателю):
+            - Первая строка — крючок: конкретная сцена, цифра из контекста, антитеза или узнаваемый сбой.
+            - Дальше — напряжение или узнавание, потом ясный вывод / punchline.
+            - Конкретика сильнее абстракций. Короткие фразы. Живой разговорный ритм канала.
+
+            ФИНАЛ:
+            - Тип финала указан в задании этого поста — выполни его, не смешивай.
+            - Если нужен вопрос: один, живой, по теме, без штампов «а вы как?», «согласны?», «пишите в комменты».
+            - Если вопрос не нужен: утверждение / punchline, без риторического вопроса в конце.""";
+
+    private static final String SYSTEM = """
+            Ты пишешь посты для Telegram-канала от лица автора. Заменяешь рутину написания, не выглядишь как ИИ.
+            Стиль: как у автора (смотри промпт стиля и примеры топ-постов), без коуч-штампов и «5 советов».
+
+            """ + VOICE_AND_ENGAGE + """
+
+            СТРУКТУРА (Telegram — читают с телефона):
+            - Первая строка — цепляющий заголовок в **звёздочках** (жирный), с 1 эмодзи. Отдельной строкой.
             - Пустая строка после заголовка.
             - Тело: короткие абзацы по 1–3 предложения, между абзацами ПУСТАЯ СТРОКА.
-            - 1–2 ключевые мысли выдели _курсивом_ (обрамляй нижними подчёркиваниями), чтобы разбить полотно текста.
+            - 1–2 ключевые мысли выдели _курсивом_ (нижние подчёркивания).
             - Где уместно — список пунктами (каждый с новой строки, можно с эмодзи-маркером).
-            - Последняя строка — призыв к действию или вопрос аудитории (используй CTA из идеи, если дан).
+            - Последняя строка — по заданию этого поста: либо punchline, либо один живой вопрос.
 
             РАЗМЕТКА (Telegram): только **жирный** и _курсив_. Не используй # и HTML-теги.
 
@@ -38,10 +68,15 @@ public class PostDraftService {
 
             ФОРМАТ:
             - Реальные переносы строк (\\n), НЕ пиши всё одним абзацем.
-            - 2–5 эмодзи на весь пост, к месту.
+            - 2–5 эмодзи на весь пост, к месту (если автор редко использует эмодзи — меньше).
             - Без «в этом посте», без «подписывайтесь».
             - Без кавычек-ёлочек и длинных тире. Обычная пунктуация.
             Ответ — только текст поста, без пояснений.""";
+
+    private static final String TIGHTEN_SYSTEM = """
+            Ты редактор Telegram-постов. Сжимаешь текст, сохраняя голос автора и смысл.
+            """ + VOICE_AND_ENGAGE + """
+            Не добавляй новых фактов. Убери воду и повторы. Ответ — только текст поста.""";
 
     private final LlmService llmService;
 
@@ -68,7 +103,8 @@ public class PostDraftService {
             String analysisBrief
     ) {
         try {
-            String userPrompt = buildPrompt(channelTitle, idea, metrics, stylePrompt, analysisBrief);
+            String userPrompt = buildPrompt(
+                    channelTitle, idea, metrics, stylePrompt, analysisBrief, rollAudienceQuestion());
             String text = llmService.completeTextWithTimeout(SYSTEM, userPrompt, timeoutSeconds, 1800);
             return text != null ? TextHumanizer.humanize(text.trim()) : fallbackDraft(idea);
         } catch (Exception ex) {
@@ -77,11 +113,63 @@ public class PostDraftService {
         }
     }
 
+    static boolean rollAudienceQuestion() {
+        return ThreadLocalRandom.current().nextInt(100) < AUDIENCE_QUESTION_CHANCE_PERCENT;
+    }
+
+    static String audienceFinaleRule(boolean withQuestion) {
+        if (withQuestion) {
+            return """
+                    ФИНАЛ ЭТОГО ПОСТА: с вопросом к аудитории.
+                    Последняя строка — один живой вопрос по теме (не «а вы?», не «согласны?», не «пишите в комменты»).""";
+        }
+        return """
+                ФИНАЛ ЭТОГО ПОСТА: без вопроса.
+                Последняя строка — утверждение или punchline. Риторический вопрос не ставь.""";
+    }
+
+    /**
+     * Укорачивает пост по смыслу (редактирование): стиль автора, интерес.
+     * Тип финала исходника сохраняем (вопрос остаётся вопросом).
+     */
+    public String tighten(String text, String stylePrompt, int timeoutSeconds) {
+        if (text == null || text.isBlank()) {
+            return text;
+        }
+        try {
+            String prompt = """
+                    Сделай пост короче и плотнее — как будто автор сам подчистил черновик.
+
+                    %sЦель: примерно 55–70%% длины исходника (если исходник уже короткий — чуть ужми воду).
+                    Сохрани заголовок (первая строка) и главный смысл. Не выдумывай новое.
+                    Если в конце был вопрос к аудитории — оставь один, живой. Если не было — не добавляй.
+                    Короткие абзацы через пустую строку. Разметка только **жирный** и _курсив_.
+                    Ответ — только текст поста.
+
+                    Исходный пост:
+                    %s
+                    """.formatted(StylePromptBlock.format(stylePrompt), text);
+            String out = llmService.completeTextWithTimeout(
+                    TIGHTEN_SYSTEM, prompt, timeoutSeconds, 1400);
+            if (out == null || out.isBlank()) {
+                return text;
+            }
+            return TextHumanizer.humanize(out.trim());
+        } catch (Exception ex) {
+            log.warn("Tighten post failed: {}", ex.getMessage());
+            return text;
+        }
+    }
+
     /**
      * Сжимает пост под лимит caption к фото (Telegram ≤ 1024 HTML).
-     * Сохраняет смысл, заголовок и CTA.
+     * Сохраняет смысл, заголовок и тип финала (вопрос не выкидывать, новый не придумывать).
      */
     public String shortenForPhotoCaption(String text, int timeoutSeconds) {
+        return shortenForPhotoCaption(text, null, timeoutSeconds);
+    }
+
+    public String shortenForPhotoCaption(String text, String stylePrompt, int timeoutSeconds) {
         if (text == null || text.isBlank()) {
             return text;
         }
@@ -93,18 +181,19 @@ public class PostDraftService {
                     Сожми пост для публикации С ФОТО в Telegram.
                     Лимит подписи: не больше %d символов markdown (цель), итог после HTML ≤ 1024.
 
-                    Правила:
+                    %sПравила:
                     - сохрани заголовок (первая строка) и главный смысл;
-                    - сохрани финальный CTA/вопрос, если есть;
+                    - если в конце был вопрос — оставь один короткий; если не было — не добавляй;
                     - убери воду и повторы, короткие абзацы через пустую строку;
+                    - не выдумывай фактов;
                     - разметка только **жирный** и _курсив_;
                     - ответ — только текст поста, без пояснений.
 
                     Исходный пост:
                     %s
-                    """.formatted(TelegramLimits.PHOTO_SAFE_MARKDOWN, text);
+                    """.formatted(TelegramLimits.PHOTO_SAFE_MARKDOWN, StylePromptBlock.format(stylePrompt), text);
             String out = llmService.completeTextWithTimeout(
-                    "Ты редактор Telegram-постов. Сжимаешь текст без потери смысла.",
+                    TIGHTEN_SYSTEM,
                     prompt,
                     timeoutSeconds,
                     1400
@@ -138,7 +227,8 @@ public class PostDraftService {
             ContentIdeaEntity idea,
             AnalysisMetrics metrics,
             String stylePrompt,
-            String analysisBrief
+            String analysisBrief,
+            boolean withAudienceQuestion
     ) {
         StringBuilder samples = new StringBuilder();
         int n = 0;
@@ -151,9 +241,9 @@ public class PostDraftService {
         if (samples.isEmpty()) {
             samples.append("• мало данных — опирайся на название канала\n");
         }
-        String cta = idea.getCta() != null && !idea.getCta().isBlank()
+        String ctaHint = idea.getCta() != null && !idea.getCta().isBlank()
                 ? idea.getCta()
-                : "— сформулируй сам короткий вопрос/призыв";
+                : "—";
         String gap = idea.getClosesGap() != null && !idea.getClosesGap().isBlank()
                 ? idea.getClosesGap()
                 : "н/д";
@@ -165,7 +255,8 @@ public class PostDraftService {
                 Почему зайдёт: %s
                 Закрывает просадку: %s
                 Формат: %s
-                CTA в финале: %s
+                Ориентир CTA из идеи: %s
+                %s
                 Лучшее время: %s
                 %s
                 Примеры удачных постов канала (вторичный ориентир, если не противоречат стилю выше):
@@ -173,6 +264,7 @@ public class PostDraftService {
 
                 Напиши один готовый пост по этой идее. Зацепи с первой строки — учти бриф разбора, если он есть.
                 Заголовок — отдельной строкой, потом пустая строка, потом короткие абзацы через пустую строку.
+                Не выходи из роли автора. Не добавляй фактов вне идеи и брифа.
                 """.formatted(
                 channelTitle,
                 StylePromptBlock.format(stylePrompt),
@@ -181,7 +273,8 @@ public class PostDraftService {
                 idea.getReason() != null ? idea.getReason() : "—",
                 gap,
                 idea.getFormat() != null ? idea.getFormat() : "текст",
-                cta,
+                ctaHint,
+                audienceFinaleRule(withAudienceQuestion),
                 idea.getSuggestedDay() != null ? idea.getSuggestedDay() : "будни вечером",
                 preferShort
                         ? "Длина: короткий пост, цель ≤ " + TelegramLimits.PHOTO_SAFE_MARKDOWN + " символов (под фото).\n"

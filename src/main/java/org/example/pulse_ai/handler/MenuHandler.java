@@ -326,7 +326,7 @@ public class MenuHandler {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         if (requestId != null) {
             rows.add(List.of(btn("📂 Открыть последний отчёт", CallbackData.PREFIX_HIST + "open:" + requestId)));
-            rows.add(List.of(btn("✍️ К идеям постов", CallbackData.PREFIX_RESULT + "ideas:" + requestId)));
+            rows.add(List.of(btn("💡 Что публиковать", CallbackData.PREFIX_RESULT + "ideas:" + requestId)));
         }
         rows.add(List.of(btn("📁 Все отчёты", CallbackData.PREFIX_HIST + "list")));
         rows.add(List.of(btn("🔍 Новый анализ", CallbackData.REQ_FREE)));

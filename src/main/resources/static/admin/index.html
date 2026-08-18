@@ -125,12 +125,22 @@
 
       <section id="view-accounts" class="view hidden anim-view">
         <div class="panel tip-panel">
+          <h2>Новый купленный акк (ещё не заходил)</h2>
+          <ol class="tips" style="padding-left:18px">
+            <li>Прокси в пуле <b>до</b> первого коннекта. 1 прокси = 1 акк.</li>
+            <li>Справа «Добавить скаута»: PARSER <code>1–99</code> или SENDER <code>100–999</code>. Один tdata — один ID.</li>
+            <li>Карточка → телефон / User ID / заметка покупки.</li>
+            <li>Залить <b>tdata.zip</b> или <code>.session</code>. Папку tdata не открывать.</li>
+            <li>«Проверить вход» → бейдж TG в сети → <b>Запустить (ACTIVE)</b> → кабинет Telegram.</li>
+            <li>PARSER: «В пул групп» или вкладка ЦА / join. Нужно ≥2 живых парсера.</li>
+          </ol>
+        </div>
+        <div class="panel tip-panel">
           <h2>Роли</h2>
           <ul class="tips">
-            <li><b>PARSER / OBSERVER</b> — ID <code>1–99</code> (короткие). Смотрят/парсят, ЛС не шлют. Если >99 → <code>1000+</code>.</li>
-            <li><b>SENDER / OUTREACH</b> — ID <code>100–999</code> (длинные). Только ЛС. Если >999 → <code>2000+</code>. Старый #33 ок.</li>
-            <li><b>ACTIVE в БД ≠ в сети в Telegram.</b> Старт не даст, пока нет сессии. Смотри бейдж «TG в сети / TG нет».</li>
-            <li>Карточка ≠ живой аккаунт. После создания: сессия → прокси → «Старт».</li>
+            <li><b>PARSER / OBSERVER</b> — ID <code>1–99</code>. Смотрят/парсят, ЛС не шлют. Если >99 → <code>1000+</code>.</li>
+            <li><b>SENDER / OUTREACH</b> — ID <code>100–999</code>. Только ЛС. Если >999 → <code>2000+</code>.</li>
+            <li><b>ACTIVE в БД ≠ в сети.</b> Старт без сессии не даст. FLOOD → карантин 2ч, Старт заблокирован.</li>
           </ul>
         </div>
         <div class="accounts-layout">
@@ -255,11 +265,12 @@
         <div class="tg-toolbar">
           <div>
             <h2 class="tg-toolbar-title">Переписка</h2>
-            <p class="muted" style="margin:0">Слева — чаты выбранного скаута. Справа — диалог как в Telegram.</p>
+            <p class="muted" style="margin:0">Слева — чаты выбранного скаута. Справа — диалог как в Telegram. Если сессия сгорела — открывается копия из архива.</p>
           </div>
-          <div class="row gap">
+            <div class="row gap">
             <select id="inbox-account" class="tg-account-select"></select>
             <button type="button" id="inbox-load" class="btn btn-secondary">Обновить</button>
+            <button type="button" id="inbox-backfill" class="btn btn-secondary" title="Подтянуть историю ЛС в архив">Бэкфилл архива</button>
           </div>
         </div>
         <div class="tg-cabinet tg-skin">
@@ -287,6 +298,7 @@
               <div class="tg-chat-head-text">
                 <h2 id="chat-title">Выбери чат</h2>
                 <p id="chat-sub" class="tg-chat-sub">аккаунт скаута</p>
+                <span id="chat-archive-badge" class="tg-archive-badge hidden">из архива</span>
               </div>
               <button type="button" id="mark-read-btn" class="btn btn-sm tg-read-btn" disabled>Прочитано</button>
             </header>
@@ -307,7 +319,8 @@
       <section id="view-audience" class="view hidden anim-view">
         <div class="panel tip-panel">
           <h2>Join списком + парсинг ЦА</h2>
-          <p class="muted">Ссылки попадают в <b>общий пул</b> — не привязаны к одному акку. Join идёт сам, ~1 группа / 30 сек. Сгорел скаут → новый забирает очередь кнопкой «В пул групп».</p>
+          <p class="muted">Сначала разбор канала вытаскивает ЦА из постов (роль, запросы, где парсить). Сюда в пул клади чаты, которые бот указал как площадки парсинга — не «бизнес» как нишу.</p>
+          <p class="muted">Ссылки попадают в <b>общий пул</b> — не привязаны к одному акку. Join идёт сам, ~1 группа / 30 сек, ≤60/акк в сутки. Сгорел скаут → новый забирает очередь кнопкой «В пул групп».</p>
           <p id="chat-pool-stats" class="muted" style="margin:8px 0 0"></p>
         </div>
         <div class="grid two">
@@ -343,6 +356,14 @@
               <button type="submit" class="btn btn-primary">Проанализировать</button>
             </form>
           </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>3. Матрица группы × скауты</h2>
+            <button type="button" id="chat-matrix-refresh" class="btn btn-sm btn-secondary">Обновить</button>
+          </div>
+          <p class="muted" style="margin:0 0 8px">Галка = этот скаут в очереди / уже вступил. Снять галку — только с очереди Pulse, из Telegram не выходим.</p>
+          <div id="chat-matrix" class="table-wrap matrix-wrap"><p class="muted">Загрузка…</p></div>
         </div>
         <div class="panel">
           <div class="panel-head">
@@ -395,6 +416,13 @@
       </section>
 
       <section id="view-radar" class="view hidden anim-view">
+        <div class="panel tip-panel">
+          <h2>Радар площадок</h2>
+          <ul class="tips">
+            <li>Хиты «реклама/прайс» в чатах наблюдения — слоты для закупки.</li>
+            <li>Поиск площадок в боте: посты канала → роль ЦА → несколько запросов → отсев тех, кто не пересекается с токенами. Не один ярлык каталога.</li>
+          </ul>
+        </div>
         <div class="grid two">
           <div class="panel">
             <div class="panel-head"><h2>Наблюдения</h2></div>

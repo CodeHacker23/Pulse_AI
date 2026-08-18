@@ -19,6 +19,11 @@ public interface ScoutChatMembershipRepository extends JpaRepository<ScoutChatMe
 
     List<ScoutChatMembershipEntity> findByScoutAccountId(Long scoutAccountId);
 
+    List<ScoutChatMembershipEntity> findByChatId(Long chatId);
+
+    long countByScoutAccountIdAndStatusAndJoinedAtGreaterThanEqual(
+            Long scoutAccountId, String status, Instant joinedAt);
+
     @Query("""
             SELECT m FROM ScoutChatMembershipEntity m
             WHERE m.status IN ('PENDING', 'FAILED')

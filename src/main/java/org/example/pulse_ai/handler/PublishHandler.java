@@ -93,9 +93,24 @@ public class PublishHandler {
             attachPhoto(chatId, messageId, user, postId, false);
             return;
         }
+        if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "photomenu:")) {
+            long postId = parseId(callbackData, "photomenu:");
+            showPhotoMenu(chatId, messageId, user, postId);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "ownphoto:")) {
+            long postId = parseId(callbackData, "ownphoto:");
+            startOwnPhoto(chatId, messageId, user, postId);
+            return;
+        }
         if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "shorten:")) {
             long postId = parseId(callbackData, "shorten:");
             shortenThenAttachPhoto(chatId, messageId, user, postId);
+            return;
+        }
+        if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "tighter:")) {
+            long postId = parseId(callbackData, "tighter:");
+            tightenPost(chatId, messageId, user, postId);
             return;
         }
         if (callbackData.startsWith(CallbackData.PREFIX_PUBLISH + "rephoto:")) {
@@ -184,6 +199,90 @@ public class PublishHandler {
         }
     }
 
+    public void openPhotoMenu(long chatId, int messageId, UserEntity user, long postId) {
+        showPhotoMenu(chatId, messageId, user, postId);
+    }
+
+    private void showPhotoMenu(long chatId, int messageId, UserEntity user, long postId) {
+        PostContext ctx = loadPostContext(postId, user).orElse(null);
+        if (ctx == null) {
+            messageSender.sendTextSafe(chatId, "❌ Черновик не найден.");
+            return;
+        }
+        UserSession session = sessionService.getOrCreate(chatId);
+        session.setPostId(postId);
+        session.setRequestId(ctx.request().getId());
+        boolean stock = imageService.isConfigured();
+        String text = """
+                🖼 <b>Фото к посту</b>
+
+                %s
+                После «Своё фото» просто пришлите картинку сюда.""".formatted(
+                stock
+                        ? "Можно подобрать фото или загрузить своё."
+                        : "Сток не настроен — можно загрузить своё фото.");
+        InlineKeyboardMarkup keyboard = keyboards.photoMenuInline(postId, stock);
+        if (messageId > 0) {
+            messageSender.editTextOrReplace(chatId, messageId, text, keyboard);
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, text, keyboard);
+        }
+    }
+
+    private void startOwnPhoto(long chatId, int messageId, UserEntity user, long postId) {
+        PostContext ctx = loadPostContext(postId, user).orElse(null);
+        if (ctx == null) {
+            messageSender.sendTextSafe(chatId, "❌ Черновик не найден.");
+            return;
+        }
+        UserSession session = sessionService.getOrCreate(chatId);
+        String draft = resolveDraftText(session, ctx.post());
+        if (!TelegramLimits.fitsPhotoCaption(draft)) {
+            showCaptionTooLong(chatId, messageId, postId, draft);
+            return;
+        }
+        session.setPostId(postId);
+        session.setRequestId(ctx.request().getId());
+        session.setState(BotState.POST_PHOTO_WAIT);
+        String text = """
+                📎 <b>Своё фото</b>
+
+                Пришлите картинку <b>одним сообщением</b> (фото или файл JPG/PNG/WEBP).
+                <i>/cancel — отмена</i>""";
+        InlineKeyboardMarkup keyboard = keyboards.photoWaitInline(postId);
+        if (messageId > 0) {
+            messageSender.editTextOrReplace(chatId, messageId, text, keyboard);
+        } else {
+            messageSender.sendTextWithInlineSafe(chatId, text, keyboard);
+        }
+    }
+
+    /** Юзер прислал своё фото в состоянии POST_PHOTO_WAIT. */
+    public void handleOwnPhoto(long chatId, UserEntity user, String fileId) {
+        UserSession session = sessionService.getOrCreate(chatId);
+        Long postId = session.getPostId();
+        if (postId == null || fileId == null || fileId.isBlank()) {
+            messageSender.sendTextSafe(chatId, "Сессия сброшена. Откройте черновик и снова нажмите «🖼 Фото».");
+            return;
+        }
+        PostContext ctx = loadPostContext(postId, user).orElse(null);
+        if (ctx == null) {
+            messageSender.sendTextSafe(chatId, "❌ Черновик не найден.");
+            return;
+        }
+        String draft = resolveDraftText(session, ctx.post());
+        if (!TelegramLimits.fitsPhotoCaption(draft)) {
+            showCaptionTooLong(chatId, 0, postId, draft);
+            return;
+        }
+        String ref = TelegramMessageSender.tgFileRef(fileId);
+        generatedPostService.setImageUrl(postId, ref);
+        session.setState(BotState.POST_PREVIEW);
+        String caption = "🖼 <b>Ваше фото</b>\n\nМеню ниже — в эфир, заменить или без фото.";
+        InlineKeyboardMarkup keyboard = keyboards.photoPreviewInline(postId, imageService.isConfigured());
+        messageSender.sendPhotoUrlWithInlineSafe(chatId, ref, caption, keyboard);
+    }
+
     private void attachPhoto(long chatId, int messageId, UserEntity user, long postId, boolean another) {
         PostContext ctx = loadPostContext(postId, user).orElse(null);
         if (ctx == null) {
@@ -191,9 +290,7 @@ public class PublishHandler {
             return;
         }
         if (!imageService.isConfigured()) {
-            messageSender.sendTextSafe(chatId,
-                    "🖼 Подбор фото пока не настроен. Добавьте бесплатный ключ Pexels "
-                            + "(pulse.images.pexels-api-key) — и бот начнёт подбирать картинки к постам.");
+            startOwnPhoto(chatId, messageId, user, postId);
             return;
         }
 
@@ -209,22 +306,25 @@ public class PublishHandler {
                 : imageService.suggestForPost(text, ctx.channel().getTitle());
 
         if (found.isEmpty()) {
-            String note = "🖼 К этому посту фото не подошло. Попробуйте ещё раз или опубликуйте без картинки.";
+            String note = "🖼 Из стока ничего не нашлось. Загрузите своё или публикуйте без картинки.";
+            InlineKeyboardMarkup kb = keyboards.photoMenuInline(postId, true);
             if (messageId > 0) {
-                messageSender.editText(chatId, messageId, note, keyboards.publishPreviewInline(postId));
+                messageSender.editText(chatId, messageId, note, kb);
             } else {
-                messageSender.sendTextWithInlineSafe(chatId, note, keyboards.publishPreviewInline(postId));
+                messageSender.sendTextWithInlineSafe(chatId, note, kb);
             }
             return;
         }
 
         PostImageService.ImageSuggestion img = found.get();
         generatedPostService.setImageUrl(postId, img.imageUrl());
+        session.setPostId(postId);
+        session.setState(BotState.POST_PREVIEW);
 
         String caption = "🖼 <b>Фото для поста</b>\n"
                 + "Источник: " + TgHtml.esc(img.author()) + " · Pexels\n\n"
-                + "Меню ниже — публикуйте, смените фото или вернитесь к тексту.";
-        InlineKeyboardMarkup keyboard = keyboards.photoPreviewInline(postId);
+                + "Меню ниже — в эфир, другое фото или своё.";
+        InlineKeyboardMarkup keyboard = keyboards.photoPreviewInline(postId, true);
         boolean updated = messageId > 0
                 && messageSender.editPhotoUrlSafe(chatId, messageId, img.imageUrl(), caption, keyboard);
         if (!updated) {
@@ -232,7 +332,7 @@ public class PublishHandler {
                     chatId, img.imageUrl(), caption, keyboard);
             if (!sent) {
                 messageSender.sendTextSafe(chatId,
-                        "Не удалось показать фото. Попробуйте «🔄 Другое фото» или опубликуйте без картинки.");
+                        "Не удалось показать фото. Попробуйте ещё раз или загрузите своё.");
             }
         }
     }
@@ -262,11 +362,37 @@ public class PublishHandler {
             messageSender.sendTextSafe(chatId, "✂️ Сокращаю текст под фото…");
         }
         String shortened = postDraftService.shortenForPhotoCaption(
-                text, analysisProperties.getLlmTimeoutSeconds());
+                text, ctx.channel().getContentStylePrompt(), analysisProperties.getLlmTimeoutSeconds());
         generatedPostService.replaceText(postId, shortened);
         session.setEditDraft(shortened);
         session.setPostId(postId);
         attachPhoto(chatId, messageId, user, postId, false);
+    }
+
+    /** Укоротить пост в редактировании / с экрана черновика — без ухода из стиля автора. */
+    private void tightenPost(long chatId, int messageId, UserEntity user, long postId) {
+        PostContext ctx = loadPostContext(postId, user).orElse(null);
+        if (ctx == null) {
+            messageSender.sendTextSafe(chatId, "❌ Черновик не найден.");
+            return;
+        }
+        UserSession session = sessionService.getOrCreate(chatId);
+        String text = resolveDraftText(session, ctx.post());
+        if (messageId > 0) {
+            messageSender.editText(chatId, messageId, "✂️ Делаю короче…", null);
+        } else {
+            messageSender.sendTextSafe(chatId, "✂️ Делаю короче…");
+        }
+        String tightened = postDraftService.tighten(
+                text, ctx.channel().getContentStylePrompt(), analysisProperties.getLlmTimeoutSeconds());
+        generatedPostService.replaceText(postId, tightened);
+        session.setEditDraft(tightened);
+        session.setPostId(postId);
+        if (session.getState() == BotState.POST_EDIT) {
+            startEdit(chatId, messageId, user, postId);
+        } else {
+            backToDraft(chatId, messageId, user, postId);
+        }
     }
 
     private void showPublishWhen(long chatId, int messageId, UserEntity user, long postId) {
@@ -275,21 +401,33 @@ public class PublishHandler {
             messageSender.sendTextSafe(chatId, "❌ Черновик не найден.");
             return;
         }
+        ChannelPublishService.PublishReadiness readiness = publishService.checkReadiness(ctx.channel());
+        if (!readiness.allowed()) {
+            String blocked = ConversionCopy.publishBlocked(readiness.message());
+            InlineKeyboardMarkup kb = keyboards.publishBlockedInline();
+            if (messageId > 0) {
+                messageSender.editTextOrReplace(chatId, messageId, blocked, kb);
+            } else {
+                messageSender.sendTextWithInlineSafe(chatId, blocked, kb);
+            }
+            return;
+        }
         UserSession session = sessionService.getOrCreate(chatId);
         session.setPostId(postId);
         session.setRequestId(ctx.request().getId());
         session.setState(BotState.POST_PREVIEW);
 
         boolean hasPhoto = ctx.post().getImageUrl() != null && !ctx.post().getImageUrl().isBlank();
+        String draftText = resolveDraftText(session, ctx.post());
         String text = """
-                📤 <b>Когда опубликовать?</b>
+                🚀 <b>«%s»</b> · %s
 
-                Канал: «%s»
                 %s
 
-                Выберите: сразу в эфир или по расписанию.""".formatted(
+                <i>Сейчас или по слоту?</i>""".formatted(
                 TgHtml.esc(ctx.channel().getTitle()),
-                hasPhoto ? "🖼 С фото" : "Текст без фото");
+                hasPhoto ? "с фото" : "текст",
+                TgHtml.fromMarkdown(draftText));
 
         InlineKeyboardMarkup keyboard = keyboards.publishWhenInline(postId);
         if (messageId > 0) {
@@ -435,7 +573,7 @@ public class PublishHandler {
         String text = ConversionCopy.draftHeader(ideaTitle)
                 + "\n\n"
                 + TgHtml.fromMarkdown(draftText)
-                + "\n\n<i>Отредактируйте под себя и публикуйте.</i>";
+                + ConversionCopy.draftNextStepHint();
 
         InlineKeyboardMarkup keyboard = keyboards.draftResultInline(
                 ctx.request().getId(),

@@ -7,6 +7,7 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.example.pulse_ai.config.TelegramBotProperties;
 
 @Slf4j
@@ -56,5 +57,18 @@ public class ChannelPulseBot extends TelegramLongPollingBot {
     @Override
     public String getBotUsername() {
         return botUsername;
+    }
+
+    /**
+     * Библиотека при registerBot всегда зовёт это. Если api.telegram.org
+     * на секунду не отвечает — не валим весь Spring: long polling всё равно можно стартовать.
+     */
+    @Override
+    public void clearWebhook() {
+        try {
+            super.clearWebhook();
+        } catch (TelegramApiException ex) {
+            log.warn("Не удалось сбросить webhook (продолжаем long polling): {}", ex.getMessage());
+        }
     }
 }

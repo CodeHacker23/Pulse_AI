@@ -150,6 +150,7 @@ public class ManagerHandler {
             sb.append('\n');
             sb.append("• ").append(dm.counterLine()).append('\n');
             sb.append("• Парсинг: <b>").append(parse.remaining()).append("</b> ост.\n");
+            sb.append("\n👉 Комменты ловим сами. Рассылка и парсинг — кнопки ниже.");
         } else {
             sb.append("• Доступ: 🔒 нужна подписка Ассистент (от 3990 ₽)\n");
         }
@@ -175,9 +176,7 @@ public class ManagerHandler {
         send(chatId, messageId,
                 "🔥 <b>Лиды и продажи</b>\n\n"
                         + "• <b>Лиды</b> — CRM по комментариям\n"
-                        + "• <b>Рассылка</b> — исходящие ЛС\n"
-                        + "• <b>Парсинг ЦА</b> — участники группы, отсев мёртвых/накрутки\n"
-                        + "• Профиль, возражения, выводы",
+                        + "• Профиль компании, возражения, выводы",
                 keyboards.agentSalesInline(leadCount));
     }
 
@@ -241,7 +240,11 @@ public class ManagerHandler {
             for (HotLeadEntity lead : leads) {
                 String when = HUMAN.format(ZonedDateTime.ofInstant(lead.getCreatedAt(), MSK));
                 sb.append(LeadStatus.of(lead.getStatus()).label()).append(" · <b>").append(when).append("</b> · ")
-                        .append(mention(lead)).append('\n');
+                        .append(mention(lead));
+                if ("OUTREACH_REPLY".equals(lead.getCategory())) {
+                    sb.append(" · рассылка");
+                }
+                sb.append('\n');
                 String text = lead.getCommentText() != null ? lead.getCommentText() : "";
                 text = text.replace('\n', ' ').trim();
                 if (text.length() > 90) {

@@ -52,6 +52,10 @@ public class ScoutAccountEntity {
     @Column(name = "last_spambot_at")
     private Instant lastSpambotAt;
 
+    /** До этого момента статус FLOOD_WAIT — в ACTIVE нельзя (join/ЛС). */
+    @Column(name = "quarantine_until")
+    private Instant quarantineUntil;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 

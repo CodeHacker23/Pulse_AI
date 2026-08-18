@@ -58,7 +58,11 @@ public class ScoutAdminHandler {
             showStatus(chatId, messageId, user);
         } else if (callbackData.startsWith(CallbackData.AGENT_SCOUT_RESUME)) {
             long id = Long.parseLong(callbackData.substring(CallbackData.AGENT_SCOUT_RESUME.length()));
-            scoutAccountService.resume(id);
+            String blocked = scoutAccountService.resume(id);
+            if (blocked != null) {
+                send(chatId, messageId, "⏳ " + TgHtml.esc(blocked), keyboards.agentBackInline());
+                return;
+            }
             showStatus(chatId, messageId, user);
         } else if (callbackData.startsWith(CallbackData.AGENT_SCOUT_CAMPAIGN_PAUSE)) {
             long id = Long.parseLong(callbackData.substring(CallbackData.AGENT_SCOUT_CAMPAIGN_PAUSE.length()));

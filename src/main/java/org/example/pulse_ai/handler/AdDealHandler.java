@@ -23,7 +23,7 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Воронка сделки: формат → цены (+20%) → креатив → бриф админу → AGREED/REJECTED.
+ * Воронка сделки: формат → креатив → бриф админу → AGREED/REJECTED.
  */
 @Component
 @RequiredArgsConstructor
@@ -110,19 +110,12 @@ public class AdDealHandler {
     }
 
     private void showFormatPicker(long chatId, int messageId, AdDealEntity deal) {
-        int admin = deal.getPriceAdminRub() != null ? deal.getPriceAdminRub() : 1500;
         String text = """
                 📋 <b>Сделка #%d</b> · @%s
 
-                Выберите формат размещения.
-                Ориентир цены поста (админу): ~%s ₽
-                Вам через Pulse: цена админа <b>+%d%%</b>.
-
-                Закреп обычно дороже обычного поста.""".formatted(
+                Выберите формат размещения.""".formatted(
                 deal.getId(),
-                TgHtml.esc(deal.getTargetUsername()),
-                formatNum(admin),
-                AdDealService.COMMISSION_PERCENT);
+                TgHtml.esc(deal.getTargetUsername()));
         editOrSend(chatId, messageId, text, keyboards.adDealFormatInline(deal.getId()));
     }
 
@@ -143,17 +136,14 @@ public class AdDealHandler {
             return;
         }
         int admin = deal.getPriceAdminRub() != null ? deal.getPriceAdminRub() : 0;
-        int client = deal.getPriceClientRub() != null
-                ? deal.getPriceClientRub()
-                : AdDealService.clientPrice(Math.max(admin, 1));
         StringBuilder sb = new StringBuilder();
         sb.append("📋 <b>Сделка #").append(deal.getId()).append("</b>\n");
         sb.append("Площадка: <b>@").append(TgHtml.esc(deal.getTargetUsername())).append("</b>\n");
         sb.append("Статус: <b>").append(AdDealStatuses.label(deal.getStatus())).append("</b>\n");
         sb.append("Формат: ").append(TgHtml.esc(AdPinFormats.label(deal.getPinFormat()))).append('\n');
-        sb.append("Админу: ~<b>").append(formatNum(admin)).append(" ₽</b>\n");
-        sb.append("Вам (+").append(AdDealService.COMMISSION_PERCENT).append("%): ~<b>")
-                .append(formatNum(client)).append(" ₽</b>\n");
+        if (admin > 0) {
+            sb.append("Цена админа: ~<b>").append(formatNum(admin)).append(" ₽</b>\n");
+        }
         if (deal.getCreativeDraft() != null && !deal.getCreativeDraft().isBlank()) {
             sb.append("\n✍️ Креатив:\n").append(TgHtml.fromMarkdown(
                     shorten(deal.getCreativeDraft(), 500))).append('\n');
@@ -164,7 +154,6 @@ public class AdDealHandler {
             sb.append("\n📝 Заметки: <i>").append(TgHtml.esc(shorten(deal.getAdminNotes(), 200)))
                     .append("</i>\n");
         }
-        sb.append("\n<i>Оплата/эскроу — следующий этап. Сейчас фиксируем договорённость.</i>");
         editOrSend(chatId, messageId, sb.toString().trim(), keyboards.adDealCardInline(deal));
     }
 
@@ -280,11 +269,8 @@ public class AdDealHandler {
         }
         session.setAdDealId(null);
         session.setState(BotState.MAIN_MENU);
-        int client = AdDealService.clientPrice(price);
         messageSender.sendTextWithInlineSafe(chatId,
                 "✅ Цена админа: <b>" + formatNum(price) + " ₽</b>\n"
-                        + "Вам: <b>" + formatNum(client) + " ₽</b> (+"
-                        + AdDealService.COMMISSION_PERCENT + "%)\n"
                         + "Статус: <b>согласовано</b>",
                 keyboards.adDealCardInline(dealService.findOwned(dealId, user.getId()).orElse(deal)));
     }

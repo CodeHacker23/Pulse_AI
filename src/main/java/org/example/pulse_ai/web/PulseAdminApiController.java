@@ -11,6 +11,7 @@ import org.example.pulse_ai.domain.scout.ScoutChatImportService;
 import org.example.pulse_ai.domain.scout.ScoutChatPoolService;
 import org.example.pulse_ai.domain.scout.ScoutAccountService;
 import org.example.pulse_ai.domain.scout.ScoutActionLogService;
+import org.example.pulse_ai.domain.scout.ScoutMessageArchiveService;
 import org.example.pulse_ai.domain.scout.ScoutSessionGateway;
 import org.example.pulse_ai.domain.scout.ScoutSidecarHealthService;
 import org.example.pulse_ai.persistence.entity.OutreachCampaignEntity;
@@ -22,8 +23,11 @@ import org.example.pulse_ai.persistence.repository.AdWatchSourceRepository;
 import org.example.pulse_ai.persistence.repository.OutreachCampaignRepository;
 import org.example.pulse_ai.persistence.repository.OutreachProspectRepository;
 import org.example.pulse_ai.domain.scout.SidecarAdminClient;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -67,6 +71,7 @@ public class PulseAdminApiController {
     private final ProductReleaseService productReleaseService;
     private final ScoutChatImportService chatImportService;
     private final ScoutChatPoolService chatPoolService;
+    private final ScoutMessageArchiveService messageArchive;
 
     @GetMapping("/dashboard")
     public Map<String, Object> dashboard(HttpServletRequest request,
@@ -167,19 +172,29 @@ public class PulseAdminApiController {
         if (ScoutAccountService.isParserType(type)) {
             enrolled = chatPoolService.enrollAccount(saved.getId());
         }
+        var proxyAssign = scoutGateway.assignProxy(saved.getId());
+        Map<String, Object> proxy = Map.of(
+                "ok", proxyAssign.ok(),
+                "detail", proxyAssign.detail() != null ? proxyAssign.detail() : "",
+                "error", proxyAssign.error() != null ? proxyAssign.error() : ""
+        );
         Map<String, Object> out = new HashMap<>();
         out.put("ok", true);
         out.put("account", saved);
         out.put("sidecar", sidecar);
         out.put("poolEnrolled", enrolled);
+        out.put("proxy", proxy);
         boolean sideOk = Boolean.TRUE.equals(sidecar.get("ok"));
+        boolean proxyOk = Boolean.TRUE.equals(proxy.get("ok"));
         out.put("hint", sideOk
                 ? ("Карточка #" + saved.getId() + " ("
                         + (type.equals("SENDER") || type.equals("OUTREACH")
                         ? "пишущий 100+"
                         : "парсер/наблюдатель 1–99")
-                        + "). Открой → сессия → прокси → «Старт» только когда В сети."
-                        + (enrolled > 0 ? (" В очередь join из пула: " + enrolled + " чатов.") : ""))
+                        + "). "
+                        + (proxyOk ? "Прокси закреплён. " : "Прокси не дали (пул пуст?) — вкладка Прокси. ")
+                        + "Дальше: tdata/сессия → «Старт» только когда TG в сети."
+                        + (enrolled > 0 ? (" В очередь join: " + enrolled + " чатов.") : ""))
                 : "Карточка в БД есть, но sidecar не принял регистрацию: "
                         + String.valueOf(sidecar.getOrDefault("error", "offline"))
                         + ". Запусти scout-sidecar и создай снова / нажми «Подключить».");
@@ -245,7 +260,15 @@ public class PulseAdminApiController {
                     "error", "Нельзя ACTIVE: Telegram не вошёл (" + err + "). Сначала tdata / secrets / auth_key."
             );
         }
-        scoutAccountService.resume(id);
+        String blocked = scoutAccountService.resume(id);
+        if (blocked != null) {
+            return Map.of(
+                    "ok", false,
+                    "id", id,
+                    "status", scoutAccountService.find(id).map(ScoutAccountEntity::getStatus).orElse("FLOOD_WAIT"),
+                    "error", blocked
+            );
+        }
         return Map.of("ok", true, "id", id, "status", "ACTIVE");
     }
 
@@ -267,6 +290,28 @@ public class PulseAdminApiController {
                 "detail", n > 0
                         ? ("В очередь join: " + n + " чатов из пула")
                         : "Нечего добавлять (не PARSER/OBSERVER или пул пуст / уже в очереди)");
+    }
+
+    @PostMapping("/accounts/{id}/archive-backfill")
+    public Map<String, Object> archiveBackfill(@PathVariable long id, HttpServletRequest request,
+                                               @RequestParam(value = "token", required = false) String token,
+                                               @RequestBody(required = false) Map<String, Object> body) {
+        requireAuth(request, token);
+        boolean force = body != null && Boolean.TRUE.equals(body.get("force"));
+        Map<String, Object> r = sidecarAdmin.startArchiveBackfill(id, force);
+        if (Boolean.TRUE.equals(r.get("ok"))) {
+            actionLogService.log(id, null, "ARCHIVE_BACKFILL",
+                    Boolean.TRUE.equals(r.get("started")) ? "OK" : "SKIP",
+                    String.valueOf(r.getOrDefault("reason", r.getOrDefault("state", ""))), null);
+        }
+        return r;
+    }
+
+    @GetMapping("/accounts/{id}/archive-backfill")
+    public Map<String, Object> archiveBackfillStatus(@PathVariable long id, HttpServletRequest request,
+                                                     @RequestParam(value = "token", required = false) String token) {
+        requireAuth(request, token);
+        return sidecarAdmin.archiveBackfillStatus(id);
     }
 
     @PostMapping("/accounts/{id}/rotate-proxy")
@@ -637,7 +682,36 @@ public class PulseAdminApiController {
                                        @RequestParam long accountId,
                                        @RequestParam(defaultValue = "40") int limit) {
         requireAuth(request, token);
-        return sidecarAdmin.listDialogs(accountId, limit);
+        Map<String, Object> live = sidecarAdmin.listDialogs(accountId, limit);
+        if (Boolean.TRUE.equals(live.get("ok"))) {
+            return live;
+        }
+        return messageArchive.dialogsFromArchive(
+                accountId, limit, String.valueOf(live.getOrDefault("error", "live unavailable")));
+    }
+
+    @GetMapping("/archive/media")
+    public ResponseEntity<Resource> archiveMedia(HttpServletRequest request,
+                                                 @RequestParam(value = "token", required = false) String token,
+                                                 @RequestParam long accountId,
+                                                 @RequestParam String peer,
+                                                 @RequestParam long messageId) {
+        requireAuth(request, token);
+        return messageArchive.openMedia(accountId, peer, messageId)
+                .map(file -> {
+                    MediaType mt;
+                    try {
+                        mt = MediaType.parseMediaType(file.mime());
+                    } catch (Exception ex) {
+                        mt = MediaType.APPLICATION_OCTET_STREAM;
+                    }
+                    return ResponseEntity.ok()
+                            .header(HttpHeaders.CONTENT_DISPOSITION,
+                                    "inline; filename=\"" + file.filename().replace("\"", "") + "\"")
+                            .contentType(mt)
+                            .body(file.resource());
+                })
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "media not found"));
     }
 
     @PostMapping(value = "/dialogs/resolve", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -658,7 +732,28 @@ public class PulseAdminApiController {
         long accountId = Long.parseLong(String.valueOf(body.get("accountId")));
         String peer = String.valueOf(body.get("peer"));
         int limit = body.get("limit") != null ? Integer.parseInt(String.valueOf(body.get("limit"))) : 40;
-        return sidecarAdmin.dialogMessages(accountId, peer, limit);
+        Map<String, Object> live = sidecarAdmin.dialogMessages(accountId, peer, limit);
+        if (Boolean.TRUE.equals(live.get("ok"))) {
+            Object raw = live.get("messages");
+            if (raw instanceof List<?> list) {
+                List<Map<String, Object>> msgs = new java.util.ArrayList<>();
+                for (Object item : list) {
+                    if (item instanceof Map<?, ?> m) {
+                        Map<String, Object> row = new HashMap<>();
+                        m.forEach((k, v) -> row.put(String.valueOf(k), v));
+                        msgs.add(row);
+                    }
+                }
+                try {
+                    messageArchive.ingestLiveMessages(accountId, peer, msgs);
+                } catch (Exception ex) {
+                    // архив не должен ломать кабинет
+                }
+            }
+            return live;
+        }
+        return messageArchive.messagesFromArchive(
+                accountId, peer, limit, String.valueOf(live.getOrDefault("error", "live unavailable")));
     }
 
     @PostMapping(value = "/dialogs/read", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -681,7 +776,14 @@ public class PulseAdminApiController {
         long accountId = Long.parseLong(String.valueOf(body.get("accountId")));
         String peer = String.valueOf(body.get("peer"));
         String text = String.valueOf(body.getOrDefault("text", ""));
-        return sidecarAdmin.reply(accountId, peer, text);
+        Map<String, Object> r = sidecarAdmin.reply(accountId, peer, text);
+        if (Boolean.TRUE.equals(r.get("ok"))) {
+            try {
+                messageArchive.ingestOutgoing(accountId, peer, text, r.get("messageId"));
+            } catch (Exception ignored) {
+            }
+        }
+        return r;
     }
 
     @PostMapping(value = "/audience/parse", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -815,6 +917,25 @@ public class PulseAdminApiController {
         return out;
     }
 
+    @GetMapping("/chats/matrix")
+    public Map<String, Object> chatMatrix(HttpServletRequest request,
+                                          @RequestParam(value = "token", required = false) String token) {
+        requireAuth(request, token);
+        return chatPoolService.matrix();
+    }
+
+    @PostMapping(value = "/chats/membership", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> chatMembership(HttpServletRequest request,
+                                              @RequestParam(value = "token", required = false) String token,
+                                              @RequestBody Map<String, Object> body) {
+        requireAuth(request, token);
+        long chatId = Long.parseLong(String.valueOf(body.get("chatId")));
+        long accountId = Long.parseLong(String.valueOf(body.get("accountId")));
+        boolean enrolled = Boolean.TRUE.equals(body.get("enrolled"))
+                || "true".equalsIgnoreCase(String.valueOf(body.get("enrolled")));
+        return chatPoolService.setEnrolled(chatId, accountId, enrolled);
+    }
+
     private Map<String, Object> toPoolImportResponse(ScoutChatImportService.ImportResult r) {
         Map<String, Object> out = new HashMap<>();
         out.put("ok", r.error() == null);
@@ -864,6 +985,8 @@ public class PulseAdminApiController {
             m.put("spambotToday", a.getSpambotToday());
             m.put("spambotMax", ScoutAccountService.SPAMBOT_DAILY_MAX);
             m.put("lastError", a.getLastError());
+            m.put("quarantineUntil", a.getQuarantineUntil() != null ? a.getQuarantineUntil().toString() : null);
+            m.put("inQuarantine", scoutAccountService.isInQuarantine(a));
             m.put("senderBand", ScoutAccountService.isSenderType(a.getAccountType()));
             try {
                 Map<String, Object> st = sidecarAdmin.accountStatus(a.getId());

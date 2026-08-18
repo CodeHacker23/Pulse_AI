@@ -205,6 +205,16 @@ public class SidecarAdminClient {
                 "text", text));
     }
 
+    public Map<String, Object> startArchiveBackfill(long accountId, boolean force) {
+        return postMap("/v1/archive/backfill", Map.of(
+                "accountId", accountId,
+                "force", force));
+    }
+
+    public Map<String, Object> archiveBackfillStatus(long accountId) {
+        return getMap("/v1/archive/backfill/" + accountId);
+    }
+
     public Map<String, Object> parseAudience(long accountId, String link, int limit, int minScore) {
         return postMap("/v1/audience/parse", Map.of(
                 "accountId", accountId,

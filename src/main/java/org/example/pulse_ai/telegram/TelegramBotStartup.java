@@ -41,12 +41,20 @@ public class TelegramBotStartup {
                         Не удалось зарегистрировать Telegram-бота: токен уже занят другим процессом.
                         1) Закройте все другие bootRun / java-процессы с этим ботом
                         2) Подождите 10 секунд
-                        3) Запустите снова: .\\gradlew.bat bootRun
+                        3) Запустите снова: .\\gradlew.bat bootRun --args=--spring.profiles.active=local
+                        Детали: {}""", details);
+            } else if (details.contains("webhook") || details.contains("Webhook")) {
+                log.error("""
+                        Telegram не ответил на deleteWebhook (часто VPN/сеть или второй bootRun).
+                        Админка на :8081 уже поднята. Бот не слушает апдейты, пока не будет связи.
+                        1) Один процесс bootRun — закрой остальные java с этим токеном
+                        2) VPN или telegram.bot.proxy.enabled: true в application-local.yaml
+                        3) Перезапусти .\\gradlew.bat bootRun --args=--spring.profiles.active=local
                         Детали: {}""", details);
             } else {
                 log.error("Не удалось зарегистрировать Telegram-бота: {}", details, e);
             }
-            throw new IllegalStateException("Telegram bot registration failed: " + details, e);
+            // Не роняем Spring: админка должна жить без Telegram.
         }
     }
 

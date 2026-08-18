@@ -86,6 +86,31 @@ public class TelegramPublicChannelScraper {
         return fetchChannelData(username, 1, 1, 8_000).subscriberCount();
     }
 
+    /** Текст «о канале» с публичной страницы t.me — сильнее карточки товара в постах. */
+    public String fetchAbout(String username) {
+        if (username == null || username.isBlank()) {
+            return "";
+        }
+        String normalized = username.startsWith("@") ? username.substring(1) : username;
+        try {
+            Document doc = Jsoup.connect("https://t.me/s/" + normalized)
+                    .userAgent("Mozilla/5.0 (compatible; ChannelPulseBot/1.0)")
+                    .timeout(8_000)
+                    .get();
+            Element desc = doc.selectFirst("div.tgme_channel_info_description");
+            if (desc != null && !desc.text().isBlank()) {
+                return desc.text().trim();
+            }
+            Element og = doc.selectFirst("meta[property=og:description]");
+            if (og != null && !og.attr("content").isBlank()) {
+                return og.attr("content").trim();
+            }
+        } catch (IOException ex) {
+            log.debug("Не прочитал описание @{}: {}", normalized, ex.getMessage());
+        }
+        return "";
+    }
+
     private static Integer parseSubscriberCount(Document doc) {
         // На t.me несколько счётчиков подряд (subscribers / photos / videos / links).
         // Берём только тот, у которого тип — подписчики, иначе легко схватить чужую цифру.

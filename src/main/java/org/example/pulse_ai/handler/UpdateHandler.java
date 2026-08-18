@@ -104,9 +104,41 @@ public class UpdateHandler {
             handleText(chatId, user, message.getText().trim(), message);
             return;
         }
+        if (message.hasPhoto() || message.hasDocument()) {
+            handleMedia(chatId, user, message);
+            return;
+        }
         if (message.hasSuccessfulPayment()) {
             paymentHandler.handleSuccessfulPayment(user, message.getSuccessfulPayment());
         }
+    }
+
+    private void handleMedia(long chatId, UserEntity user, Message message) {
+        UserSession session = sessionService.getOrCreate(chatId);
+        syncSessionWithDb(chatId, user, session);
+        if (session.getState() != BotState.POST_PHOTO_WAIT) {
+            messageSender.sendText(chatId, "Чтобы добавить фото к посту — откройте черновик → «🖼 Фото» → «Своё фото».");
+            return;
+        }
+        String fileId = extractImageFileId(message);
+        if (fileId == null) {
+            messageSender.sendText(chatId, "Нужна картинка: отправьте фото или файл JPG/PNG/WEBP.");
+            return;
+        }
+        publishHandler.handleOwnPhoto(chatId, user, fileId);
+    }
+
+    private static String extractImageFileId(Message message) {
+        if (message.hasPhoto() && message.getPhoto() != null && !message.getPhoto().isEmpty()) {
+            return message.getPhoto().get(message.getPhoto().size() - 1).getFileId();
+        }
+        if (message.hasDocument() && message.getDocument() != null) {
+            String mime = message.getDocument().getMimeType();
+            if (mime != null && mime.startsWith("image/")) {
+                return message.getDocument().getFileId();
+            }
+        }
+        return null;
     }
 
     private void handlePreCheckout(Update update) {
@@ -173,6 +205,12 @@ public class UpdateHandler {
             return;
         }
         if (MenuText.CMD_CANCEL.equals(text)) {
+            if (session.getState() == BotState.POST_PHOTO_WAIT && session.getPostId() != null) {
+                long postId = session.getPostId();
+                session.setState(BotState.POST_PREVIEW);
+                publishHandler.openPhotoMenu(chatId, 0, user, postId);
+                return;
+            }
             sessionService.resetToMainMenu(chatId);
             menuHandler.showMainMenu(chatId, user);
             return;

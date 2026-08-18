@@ -15,7 +15,7 @@ Before non-trivial work, read `docs/HANDOFF.md` and (if touching scouts) `docs/S
 - PARSER/OBSERVER: no DMs, no SpamBot. SENDER/OUTREACH: SpamBot ≤ 4/day.
 - Group joins only via chat pool queue (~30s), not bulk join loops.
 - Local Flyway is off: patch `H2LocalSchemaPatcher` when adding schema.
-- Agreed next feature: scout DM archive (ops backup), not a relay bot — see HANDOFF §7.
+- Agreed next feature: archive backfill + join matrix are in; see HANDOFF §7.
 
 ## Stack reminder
 Java Spring Boot bot+admin (:8081) + Python Telethon sidecar (:8090).
